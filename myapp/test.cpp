@@ -15,7 +15,7 @@ int main(void)
     options.create_if_missing = true;
 
     // 创建的数据库在 /tmp/testdb
-    leveldb::Status status = leveldb::DB::Open(options, "/home/doubled/double_D/DB/leveldb/myapp/testdb", &db);
+    leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
     assert(status.ok());
 
     std::string key = "A";
