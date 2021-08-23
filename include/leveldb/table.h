@@ -23,6 +23,10 @@ class TableCache;
 // A Table is a sorted map from strings to strings.  Tables are
 // immutable and persistent.  A Table may be safely accessed from
 // multiple threads without external synchronization.
+// actually, it is sorted strings table, SSTable
+// 一个 SSTable 是一个单一的文件，内部是分块的，然后文件末尾有一个块索引
+// 打开文件意味着先将索引读入内存，在内存中确定要读取的数据在文件（SSTbale）中的偏移
+// 然后一次磁盘IO就能把数据搞定
 class LEVELDB_EXPORT Table {
  public:
   // Attempt to open the table that is stored in bytes [0..file_size)
