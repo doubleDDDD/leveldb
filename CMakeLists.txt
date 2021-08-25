@@ -189,6 +189,8 @@ target_sources(leveldb
     "util/options.cc"
     "util/random.h"
     "util/status.cc"
+    "util/backtrace.h"
+    "util/backtrace.cc"
 
   # Only CMake 3.3+ supports PUBLIC sources in targets exported by "install".
   $<$<VERSION_GREATER:CMAKE_VERSION,3.2>:PUBLIC>
@@ -276,6 +278,9 @@ endif(HAVE_SNAPPY)
 if(HAVE_TCMALLOC)
   target_link_libraries(leveldb tcmalloc)
 endif(HAVE_TCMALLOC)
+
+# 无条件 link unwind unwind-x86_64, 假设目标机器上一定存在，我自己的机器上确实存在，以后如果有需要再处理
+target_link_libraries(leveldb unwind unwind-x86_64)
 
 # Needed by port_stdcxx.h
 find_package(Threads REQUIRED)

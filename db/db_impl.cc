@@ -295,8 +295,10 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   // Ignore error from CreateDir since the creation of the DB is
   // committed only when the descriptor is created, and this directory
   // may already exist from a previous failed creation attempt.
-  env_->CreateDir(dbname_);
+  env_->CreateDir(dbname_);  // 尝试创建代表数据库的目录
   assert(db_lock_ == nullptr);
+  // 同一时刻，只能有1个process打开数据库，db的这个实例在process退出之后也一并退出了
+  // 尝试获取文件级别的锁操作
   Status s = env_->LockFile(LockFileName(dbname_), &db_lock_);
   if (!s.ok()) {
     return s;
@@ -1480,6 +1482,13 @@ Status DB::Delete(const WriteOptions& opt, const Slice& key) {
 
 DB::~DB() = default;
 
+/**
+ * @brief open一个数据库进入的是这里
+ * @param  options          desc 配置
+ * @param  dbname           desc 目录代表一个完整的数据库
+ * @param  dbptr            desc
+ * @return Status @c 
+ */
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;
 

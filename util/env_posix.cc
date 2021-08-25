@@ -35,6 +35,8 @@
 #include "util/env_posix_test_helper.h"
 #include "util/posix_logger.h"
 
+#include "util/backtrace.h"
+
 namespace leveldb {
 
 namespace {
@@ -625,7 +627,9 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  // 操作系统级别的文件锁。filename位于代表一个KV数据库的目录下，一级目录
   Status LockFile(const std::string& filename, FileLock** lock) override {
+    // lock means db_lock，是一个open的实例的成员
     *lock = nullptr;
 
     int fd = ::open(filename.c_str(), O_RDWR | O_CREAT | kOpenBaseFlags, 0644);

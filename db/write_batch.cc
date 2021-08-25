@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 //
+// rep 的前8个字节是header
 // WriteBatch::rep_ :=
 //    sequence: fixed64
 //    count: fixed32
@@ -39,13 +40,14 @@ void WriteBatch::Clear() {
 
 size_t WriteBatch::ApproximateSize() const { return rep_.size(); }
 
+// 一个比较关键的函数，writebatch到memtable
 Status WriteBatch::Iterate(Handler* handler) const {
   Slice input(rep_);
   if (input.size() < kHeader) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
-  input.remove_prefix(kHeader);
+  input.remove_prefix(kHeader);  // 前12个字节是不需要的
   Slice key, value;
   int found = 0;
   while (!input.empty()) {
@@ -79,6 +81,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
   }
 }
 
+// 这是一个典型的数据布局
 int WriteBatchInternal::Count(const WriteBatch* b) {
   return DecodeFixed32(b->rep_.data() + 8);
 }
@@ -87,6 +90,7 @@ void WriteBatchInternal::SetCount(WriteBatch* b, int n) {
   EncodeFixed32(&b->rep_[8], n);
 }
 
+// 前8个字节
 SequenceNumber WriteBatchInternal::Sequence(const WriteBatch* b) {
   return SequenceNumber(DecodeFixed64(b->rep_.data()));
 }
@@ -97,7 +101,7 @@ void WriteBatchInternal::SetSequence(WriteBatch* b, SequenceNumber seq) {
 
 void WriteBatch::Put(const Slice& key, const Slice& value) {
   WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + 1);
-  rep_.push_back(static_cast<char>(kTypeValue));
+  rep_.push_back(static_cast<char>(kTypeValue));  // 直接append的string
   PutLengthPrefixedSlice(&rep_, key);
   PutLengthPrefixedSlice(&rep_, value);
 }
@@ -118,10 +122,14 @@ class MemTableInserter : public WriteBatch::Handler {
   SequenceNumber sequence_;
   MemTable* mem_;
 
+  // memtable是跳表
   void Put(const Slice& key, const Slice& value) override {
+    //skiplist的insert
     mem_->Add(sequence_, kTypeValue, key, value);
     sequence_++;
   }
+
+  // 这里是一个比较简单的操作
   void Delete(const Slice& key) override {
     mem_->Add(sequence_, kTypeDeletion, key, Slice());
     sequence_++;
@@ -129,6 +137,7 @@ class MemTableInserter : public WriteBatch::Handler {
 };
 }  // namespace
 
+// 批量写中的kv insert到memtable中
 Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* memtable) {
   MemTableInserter inserter;
   inserter.sequence_ = WriteBatchInternal::Sequence(b);

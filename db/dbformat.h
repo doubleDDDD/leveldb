@@ -21,6 +21,7 @@ namespace leveldb {
 
 // Grouping of constants.  We may want to make some of these
 // parameters set via options.
+// 各种key类型
 namespace config {
 static const int kNumLevels = 7;
 
@@ -168,6 +169,14 @@ inline int InternalKeyComparator::Compare(const InternalKey& a,
   return Compare(a.Encode(), b.Encode());
 }
 
+/**
+ * @brief userkey 是 internal key 的一部分，internal key 是 memtable key 的一部分
+ * 用户看起来一个key可能就是一个简单的用户可识别的字符串，但是对于levelDB内部是需要add了一些内容之后作为内部的可以用来 search 的 key
+ * @param  internal_key     desc
+ * @param  result           desc
+ * @return true @c 
+ * @return false @c 
+ */
 inline bool ParseInternalKey(const Slice& internal_key,
                              ParsedInternalKey* result) {
   const size_t n = internal_key.size();
@@ -212,6 +221,8 @@ class LookupKey {
   const char* start_;
   const char* kstart_;
   const char* end_;
+  // 分配内存，栈比堆快，短字符优化
+  // 如果是短字符的话，不用频繁的去堆上分配内存，就用栈上的就可以了
   char space_[200];  // Avoid allocation for short keys
 };
 

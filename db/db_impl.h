@@ -35,7 +35,7 @@ class DBImpl : public DB {
 
   ~DBImpl() override;
 
-  // Implementations of the DB interface
+  // Implementations of the DB interface，DB是一个抽象类
   Status Put(const WriteOptions&, const Slice& key,
              const Slice& value) override;
   Status Delete(const WriteOptions&, const Slice& key) override;
@@ -162,13 +162,13 @@ class DBImpl : public DB {
   const Options options_;  // options_.comparator == &internal_comparator_
   const bool owns_info_log_;
   const bool owns_cache_;
-  const std::string dbname_;
+  const std::string dbname_;  // 目录，levelDB中一个目录代表一个database
 
   // table_cache_ provides its own synchronization
   TableCache* const table_cache_;
 
   // Lock over the persistent DB state.  Non-null iff successfully acquired.
-  FileLock* db_lock_;
+  FileLock* db_lock_;  // 打开一个数据库是需要文件锁的
 
   // State below is protected by mutex_
   port::Mutex mutex_;

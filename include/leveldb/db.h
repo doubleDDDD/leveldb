@@ -43,6 +43,7 @@ struct LEVELDB_EXPORT Range {
 // A DB is a persistent ordered map from keys to values.
 // A DB is safe for concurrent access from multiple threads without
 // any external synchronization.
+// A DB 代表的是一个打开的目录，这个目录就是一个数据库
 class LEVELDB_EXPORT DB {
  public:
   // Open the database with the specified "name".
@@ -50,6 +51,7 @@ class LEVELDB_EXPORT DB {
   // OK on success.
   // Stores nullptr in *dbptr and returns a non-OK status on error.
   // Caller should delete *dbptr when it is no longer needed.
+  // 这玩意是一个static函数
   static Status Open(const Options& options, const std::string& name,
                      DB** dbptr);
 
