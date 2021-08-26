@@ -73,6 +73,7 @@ class MemTableIterator : public Iterator {
 
 Iterator* MemTable::NewIterator() { return new MemTableIterator(&table_); }
 
+// user级别的kv到达
 void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
                    const Slice& value) {
   // Format of an entry is concatenation of:
@@ -82,11 +83,12 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   //  value bytes  : char[value.size()]
   size_t key_size = key.size();
   size_t val_size = value.size();
-  size_t internal_key_size = key_size + 8;
+  size_t internal_key_size = key_size + 8;  // 开始对key做第一层包装
   const size_t encoded_len = VarintLength(internal_key_size) +
                              internal_key_size + VarintLength(val_size) +
                              val_size;
-  char* buf = arena_.Allocate(encoded_len);
+  // arena是levelDB级别的内存池，也就是内存管理单元
+  char* buf = arena_.Allocate(encoded_len);  // 实际上底层就是一个malloc
   char* p = EncodeVarint32(buf, internal_key_size);
   std::memcpy(p, key.data(), key_size);
   p += key_size;
@@ -95,6 +97,8 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   p = EncodeVarint32(p, val_size);
   std::memcpy(p, value.data(), val_size);
   assert(p + val_size == buf + encoded_len);
+  // 反正对kv一顿编码，各自加一些header数据
+  // 这里面就是对跳表的insert操作了
   table_.Insert(buf);
 }
 

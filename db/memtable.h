@@ -79,6 +79,7 @@ class MemTable {
   KeyComparator comparator_;
   int refs_;
   Arena arena_;
+  // table_比较朴素就是字符串的key
   Table table_;
 };
 

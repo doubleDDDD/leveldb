@@ -45,10 +45,10 @@ struct DBImpl::Writer {
       : batch(nullptr), sync(false), done(false), cv(mu) {}
 
   Status status;
-  WriteBatch* batch;
+  WriteBatch* batch;  // writer描述的是一个writebatch，writebatch包含若干kv的op
   bool sync;
   bool done;
-  port::CondVar cv;
+  port::CondVar cv;  // 还有一个条件变量
 };
 
 struct DBImpl::CompactionState {
@@ -1199,16 +1199,28 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
   return DB::Delete(options, key);
 }
 
+/**
+ * @brief writebatch的写操作，就是先把数据写入log，然后把数据写入到memtable中
+ * @param  options          desc
+ * @param  updates          desc 批量写对象的指针
+ * @return Status @c 
+ */
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
+  // writer对象，有指针指向bactch，构造一个writer对象
+  // 其实就是包裹了一层 writebatch，为writebatch赋予了一些特性以及为了更好的操作writebatch
+  // 这里说白了就是一个车，造车，类比buffer head以及bio等数据结构
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
   w.done = false;
 
   MutexLock l(&mutex_);
-  writers_.push_back(&w);
+  // std::deque<Writer*> writers_ GUARDED_BY(mutex_);  writers_是一个write队列
+  // writers_也是DB连接实例中的数据结构啊，丰富
+  writers_.push_back(&w);  // WriteBacth入队
+  // 这里应该只有多线程会入队，没有多进程这一说
   while (!w.done && &w != writers_.front()) {
-    w.cv.Wait();
+    w.cv.Wait();  // 在某些情况下，w会阻塞在这个条件变量上
   }
   if (w.done) {
     return w.status;
@@ -1216,27 +1228,38 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
 
   // May temporarily unlock and wait.
   Status status = MakeRoomForWrite(updates == nullptr);
+  // Return the last sequence number.
+  // uint64_t LastSequence() const { return last_sequence_; }
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
   if (status.ok() && updates != nullptr) {  // nullptr batch is for compactions
     WriteBatch* write_batch = BuildBatchGroup(&last_writer);
-    WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);
+    // 序列号是一个batch所共享的，并非某一个key自己的，一批的KV都是一个序列号
+    WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);  // 实际上就是一个 set header 的过程
     last_sequence += WriteBatchInternal::Count(write_batch);
 
     // Add to log and apply to memtable.  We can release the lock
     // during this phase since &w is currently responsible for logging
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
+    // 在写memtable之前写log
     {
       mutex_.Unlock();
+      // static Slice Contents(const WriteBatch* batch) { return Slice(batch->rep_); }
+      // status = log_->AddRecord(write_batch->rep_);
+      // 这里就是在写日志文件
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
       if (status.ok() && options.sync) {
+        // sync系统调用会保证log的持久化
         status = logfile_->Sync();
         if (!status.ok()) {
           sync_error = true;
         }
       }
+      // 日志的写入是ok的，那么开始写真实的数据
+      // 数据先写到 memtable，任何时刻memtable只有一个，一个写满之后，会锁定并且再创建另一个
+      // memtable就是跳表，batch的每一对kv都会被单独的insert到跳表中
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(write_batch, mem_);
       }
@@ -1469,9 +1492,12 @@ void DBImpl::GetApproximateSizes(const Range* range, int n, uint64_t* sizes) {
 // Default implementations of convenience methods that subclasses of DB
 // can call if they wish
 Status DB::Put(const WriteOptions& opt, const Slice& key, const Slice& value) {
-  WriteBatch batch;
-  batch.Put(key, value);
-  return Write(opt, &batch);
+  WriteBatch batch;  // WriteBatch是一个字符串序列
+  // 这里的key依然是user_key
+  // KtypeValue|keysize|key|valuesize|value
+  // kTypeDeletion|keysize|key|valuesize|value
+  batch.Put(key, value);  // batch的put仅仅是把kv put到一个writebatch对象中，就是一个字符串的追加操作但是要设置一下 header
+  return Write(opt, &batch);  // 写memtable的是这个函数
 }
 
 Status DB::Delete(const WriteOptions& opt, const Slice& key) {

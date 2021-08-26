@@ -126,7 +126,7 @@ void
 RunFather()
 {
     // sleep(2);
-    std::printf("father %d started!\n", getpid());
+    // std::printf("father %d started!\n", getpid());
 
     // 另一个进程也需要连接数据库。有file级别的锁
     leveldb::DB *db = nullptr;
@@ -156,7 +156,7 @@ RunFather()
         std::cout << s.ToString() << std::endl;
 
     // 关闭数据库的连接
-    // delete db;
+    delete db;
 
     return;
 }

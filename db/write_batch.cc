@@ -41,14 +41,16 @@ void WriteBatch::Clear() {
 size_t WriteBatch::ApproximateSize() const { return rep_.size(); }
 
 // 一个比较关键的函数，writebatch到memtable
+// 日志写完之后要写memtable的过程
 Status WriteBatch::Iterate(Handler* handler) const {
   Slice input(rep_);
   if (input.size() < kHeader) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
-  input.remove_prefix(kHeader);  // 前12个字节是不需要的
-  Slice key, value;
+  // 前12个字节是不需要的，header标识的是元数据
+  input.remove_prefix(kHeader);  
+  Slice key, value;  //slice=string in levelDB
   int found = 0;
   while (!input.empty()) {
     found++;
@@ -58,6 +60,8 @@ Status WriteBatch::Iterate(Handler* handler) const {
       case kTypeValue:
         if (GetLengthPrefixedSlice(&input, &key) &&
             GetLengthPrefixedSlice(&input, &value)) {
+          // 这里已经在向memtable中insert数据了，调用memtable的put方法
+          // 到此为止，key依然是user_key
           handler->Put(key, value);
         } else {
           return Status::Corruption("bad WriteBatch Put");
@@ -100,6 +104,7 @@ void WriteBatchInternal::SetSequence(WriteBatch* b, SequenceNumber seq) {
 }
 
 void WriteBatch::Put(const Slice& key, const Slice& value) {
+  // writebatch就是一个带header的字符串，header+一系列的kv
   WriteBatchInternal::SetCount(this, WriteBatchInternal::Count(this) + 1);
   rep_.push_back(static_cast<char>(kTypeValue));  // 直接append的string
   PutLengthPrefixedSlice(&rep_, key);
@@ -125,6 +130,7 @@ class MemTableInserter : public WriteBatch::Handler {
   // memtable是跳表
   void Put(const Slice& key, const Slice& value) override {
     //skiplist的insert
+    // 这里的key依然是user_key
     mem_->Add(sequence_, kTypeValue, key, value);
     sequence_++;
   }
