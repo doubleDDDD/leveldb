@@ -179,7 +179,7 @@ class DBImpl : public DB {
   std::atomic<bool> has_imm_;         // So bg thread can detect non-null imm_
   WritableFile* logfile_;
   uint64_t logfile_number_ GUARDED_BY(mutex_);
-  log::Writer* log_;
+  log::Writer* log_; // 代表的是WAL日志，就是写前日志，一模一样的内容再写一次
   uint32_t seed_ GUARDED_BY(mutex_);  // For sampling.
 
   // Queue of writers.
@@ -197,6 +197,7 @@ class DBImpl : public DB {
 
   ManualCompaction* manual_compaction_ GUARDED_BY(mutex_);
 
+  // 数据库只能由一个进程打开，即版本控制就是这个连接的实例，版本控制的一个对象
   VersionSet* const versions_ GUARDED_BY(mutex_);
 
   // Have we encountered a background error in paranoid mode?

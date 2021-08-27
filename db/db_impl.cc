@@ -504,6 +504,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   return status;
 }
 
+// memtable到L0表
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                                 Version* base) {
   mutex_.AssertHeld();
@@ -511,7 +512,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   FileMetaData meta;
   meta.number = versions_->NewFileNumber();
   pending_outputs_.insert(meta.number);
-  Iterator* iter = mem->NewIterator();
+  Iterator* iter = mem->NewIterator();  // 这个是skiplist的迭代器目的是为了能够很快的遍历skiplist（排序表）
   Log(options_.info_log, "Level-0 table #%llu: started",
       (unsigned long long)meta.number);
 
@@ -548,6 +549,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   return s;
 }
 
+// memtable->L0 的过程
 void DBImpl::CompactMemTable() {
   mutex_.AssertHeld();
   assert(imm_ != nullptr);
@@ -678,6 +680,7 @@ void DBImpl::MaybeScheduleCompaction() {
   }
 }
 
+// 把压缩线程调度过来
 void DBImpl::BGWork(void* db) {
   reinterpret_cast<DBImpl*>(db)->BackgroundCall();
 }
@@ -705,10 +708,11 @@ void DBImpl::BackgroundCompaction() {
   mutex_.AssertHeld();
 
   if (imm_ != nullptr) {
-    CompactMemTable();
+    CompactMemTable();  // 仅仅是 memtable->L0
     return;
   }
 
+  // 后续可能涉及继续压缩的过程，比如L0->L1/2/3
   Compaction* c;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
@@ -1201,6 +1205,7 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
 
 /**
  * @brief writebatch的写操作，就是先把数据写入log，然后把数据写入到memtable中
+ * 这个写操作可能是不同的线程进来的
  * @param  options          desc
  * @param  updates          desc 批量写对象的指针
  * @return Status @c 
@@ -1209,33 +1214,41 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   // writer对象，有指针指向bactch，构造一个writer对象
   // 其实就是包裹了一层 writebatch，为writebatch赋予了一些特性以及为了更好的操作writebatch
   // 这里说白了就是一个车，造车，类比buffer head以及bio等数据结构
+  // mutex_也是DB连接实例的对象，互斥量，c++的语义负责的是多线程的同步与互斥
+  // 这是某一个线程的写操作
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
   w.done = false;
 
-  MutexLock l(&mutex_);
+  MutexLock l(&mutex_); // 包装一下这个锁，即mutex也要上车
   // std::deque<Writer*> writers_ GUARDED_BY(mutex_);  writers_是一个write队列
   // writers_也是DB连接实例中的数据结构啊，丰富
   writers_.push_back(&w);  // WriteBacth入队
   // 这里应该只有多线程会入队，没有多进程这一说
+  // 这个地方是要排队的，不是第一个且没有完成，就阻塞在条件变量上
   while (!w.done && &w != writers_.front()) {
     w.cv.Wait();  // 在某些情况下，w会阻塞在这个条件变量上
   }
   if (w.done) {
+    // 某些线程的操作可能会被其它线程一起合并处理掉，所以这里可能被其它并发线程置位done
     return w.status;
   }
 
+  // 是整个连接实例中没有完成的第一个writebatch实例，即位于队首
   // May temporarily unlock and wait.
+  // 判断当前memtable是否足够大，如果足够大就写，如果不够大则可能触发新的memtable的创建以及旧的memtable的压缩
   Status status = MakeRoomForWrite(updates == nullptr);
   // Return the last sequence number.
   // uint64_t LastSequence() const { return last_sequence_; }
-  uint64_t last_sequence = versions_->LastSequence();
+  uint64_t last_sequence = versions_->LastSequence();  // 这返回的就是一个常量啊
   Writer* last_writer = &w;
   if (status.ok() && updates != nullptr) {  // nullptr batch is for compactions
-    WriteBatch* write_batch = BuildBatchGroup(&last_writer);
-    // 序列号是一个batch所共享的，并非某一个key自己的，一批的KV都是一个序列号
+    WriteBatch* write_batch = BuildBatchGroup(&last_writer); // 尝试合并其它writebatch
+    // 整个writebatch的序列号都是一致的目前
+    // header只记录了这一批的第一个kv的编号
     WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);  // 实际上就是一个 set header 的过程
+    // 所以这个编号还是一个kv一个
     last_sequence += WriteBatchInternal::Count(write_batch);
 
     // Add to log and apply to memtable.  We can release the lock
@@ -1247,7 +1260,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
       mutex_.Unlock();
       // static Slice Contents(const WriteBatch* batch) { return Slice(batch->rep_); }
       // status = log_->AddRecord(write_batch->rep_);
-      // 这里就是在写日志文件
+      // 这里就是在写日志文件，log是包含header的，就是裸的header，序列号也没有必要落实到每一个kv对上
+      // 基于文件系统的问题就是，你log了我的log
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
       if (status.ok() && options.sync) {
@@ -1297,20 +1311,21 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
 
 // REQUIRES: Writer list must be non-empty
 // REQUIRES: First writer must have a non-null batch
+// 如果单个writebatch太小的话，就需要在队列上去遍历合并其它线程的一些写操作，避免每一次的写操作太小
 WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
   mutex_.AssertHeld();
   assert(!writers_.empty());
   Writer* first = writers_.front();
-  WriteBatch* result = first->batch;
+  WriteBatch* result = first->batch;  // 实际上这个函数要的就是被writer所包装的这个结果
   assert(result != nullptr);
 
-  size_t size = WriteBatchInternal::ByteSize(first->batch);
+  size_t size = WriteBatchInternal::ByteSize(first->batch);  // 字符串的长度
 
   // Allow the group to grow up to a maximum size, but if the
   // original write is small, limit the growth so we do not slow
   // down the small write too much.
-  size_t max_size = 1 << 20;
-  if (size <= (128 << 10)) {
+  size_t max_size = 1 << 20;   // 1M
+  if (size <= (128 << 10)) {  // 128K
     max_size = size + (128 << 10);
   }
 
@@ -1347,8 +1362,10 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 
 // REQUIRES: mutex_ is held
 // REQUIRES: this thread is currently at the front of the writer queue
+// 持有锁才进得来，且当前线程的写操作位于整个进程的第一位
+// 写的前置条件，memtable不足触发压缩与memtable的新建也是位于这里的
 Status DBImpl::MakeRoomForWrite(bool force) {
-  mutex_.AssertHeld();
+  mutex_.AssertHeld();  // 这个写法要学习一下，判断是持有锁的
   assert(!writers_.empty());
   bool allow_delay = !force;
   Status s;
@@ -1372,6 +1389,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     } else if (!force &&
                (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
       // There is room in current memtable
+      // 这个是最简单的处理方式，就是当前的memtable足矣，所以直接写即可
       break;
     } else if (imm_ != nullptr) {
       // We have filled up the current memtable, but the previous
@@ -1398,11 +1416,12 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       logfile_ = lfile;
       logfile_number_ = new_log_number;
       log_ = new log::Writer(lfile);
-      imm_ = mem_;
+      imm_ = mem_; // 表示有 memtable 需要被压缩
       has_imm_.store(true, std::memory_order_release);
       mem_ = new MemTable(internal_comparator_);
-      mem_->Ref();
+      mem_->Ref(); // 线程的引用计数+1
       force = false;  // Do not force another compaction if have room
+      // 调度后台的压缩线程或者说是唤醒后台的压缩线程准备把 imm_ 压缩下去
       MaybeScheduleCompaction();
     }
   }
@@ -1528,13 +1547,14 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
     // Create new log and a corresponding memtable.
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     WritableFile* lfile;
+    // 新建 WAL 日志文件，文件名是[0-9].log
     s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
                                      &lfile);
     if (s.ok()) {
       edit.SetLogNumber(new_log_number);
       impl->logfile_ = lfile;
       impl->logfile_number_ = new_log_number;
-      impl->log_ = new log::Writer(lfile);
+      impl->log_ = new log::Writer(lfile);  // 新建 WAL log 文件
       impl->mem_ = new MemTable(impl->internal_comparator_);
       impl->mem_->Ref();
     }

@@ -83,13 +83,15 @@ void MemTable::Add(SequenceNumber s, ValueType type, const Slice& key,
   //  value bytes  : char[value.size()]
   size_t key_size = key.size();
   size_t val_size = value.size();
-  size_t internal_key_size = key_size + 8;  // 开始对key做第一层包装
+  size_t internal_key_size = key_size + 8;  // 开始对key做第一层包装，额外的这8字节包含序列号与type
   const size_t encoded_len = VarintLength(internal_key_size) +
                              internal_key_size + VarintLength(val_size) +
                              val_size;
   // arena是levelDB级别的内存池，也就是内存管理单元
   char* buf = arena_.Allocate(encoded_len);  // 实际上底层就是一个malloc
-  char* p = EncodeVarint32(buf, internal_key_size);
+
+  // internalkeysize|keydata|seq+type|valsize|valuedata
+  char* p = EncodeVarint32(buf, internal_key_size);  // 这里采用了可变长编码
   std::memcpy(p, key.data(), key_size);
   p += key_size;
   EncodeFixed64(p, (s << 8) | type);

@@ -48,7 +48,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
 
-  // 前12个字节是不需要的，header标识的是元数据
+  // 前12个字节是不需要的，header标识的是元数据，sequence已经拿出来了
   input.remove_prefix(kHeader);  
   Slice key, value;  //slice=string in levelDB
   int found = 0;
@@ -62,6 +62,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
             GetLengthPrefixedSlice(&input, &value)) {
           // 这里已经在向memtable中insert数据了，调用memtable的put方法
           // 到此为止，key依然是user_key
+          // handler 拥有sequence与memtable
           handler->Put(key, value);
         } else {
           return Status::Corruption("bad WriteBatch Put");
@@ -130,9 +131,9 @@ class MemTableInserter : public WriteBatch::Handler {
   // memtable是跳表
   void Put(const Slice& key, const Slice& value) override {
     //skiplist的insert
-    // 这里的key依然是user_key
+    // 这里的key依然是user_key sequence_ 是整个数据库中的一个序列号，只能由单个进程打开，线程之间由mutex来互斥
     mem_->Add(sequence_, kTypeValue, key, value);
-    sequence_++;
+    sequence_++;  // insert到skiplist中之后会有序列号的info
   }
 
   // 这里是一个比较简单的操作
@@ -146,6 +147,7 @@ class MemTableInserter : public WriteBatch::Handler {
 // 批量写中的kv insert到memtable中
 Status WriteBatchInternal::InsertInto(const WriteBatch* b, MemTable* memtable) {
   MemTableInserter inserter;
+  // inserter作为一个handler，持有序列号这个info
   inserter.sequence_ = WriteBatchInternal::Sequence(b);
   inserter.mem_ = memtable;
   return b->Iterate(&inserter);
