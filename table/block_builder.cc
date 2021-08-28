@@ -13,6 +13,7 @@
 // for a particular key.  Values are stored as-is (without compression)
 // immediately following the corresponding key.
 //
+// 会有前缀key的压缩，省空间
 // An entry for a particular key-value pair has the form:
 //     shared_bytes: varint32
 //     unshared_bytes: varint32

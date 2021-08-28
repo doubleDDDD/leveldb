@@ -45,10 +45,11 @@ Status Writer::AddRecord(const Slice& slice) {
     assert(leftover >= 0);
     if (leftover < kHeaderSize) {
       // Switch to a new block
+      // 如果当前block剩余空间小于7B，则在block尾部填0后切换至新的block
       if (leftover > 0) {
         // Fill the trailer (literal below relies on kHeaderSize being 7)
         static_assert(kHeaderSize == 7, "");
-        // dest_代表的是日志文件
+        // dest_代表的是日志文件，尾部填0
         dest_->Append(Slice("\x00\x00\x00\x00\x00\x00", leftover));
       }
       block_offset_ = 0;
@@ -72,6 +73,7 @@ Status Writer::AddRecord(const Slice& slice) {
       type = kMiddleType;
     }
 
+    // 在新的物理块中写入log
     s = EmitPhysicalRecord(type, ptr, fragment_length);
     ptr += fragment_length;
     left -= fragment_length;

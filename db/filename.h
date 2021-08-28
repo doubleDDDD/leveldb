@@ -21,7 +21,7 @@ class Env;
 enum FileType {
   kLogFile,  // 写前日志 WAL log，[0-9].log
   kDBLockFile,  // LOCK 文件，通过文件锁来实现只能有一个进程操作DB
-  kTableFile,  // sstable文件，文件名为 [0-9].sst
+  kTableFile,  // sstable文件，文件名为 [0-9].sst, .ldb db sst table 持久化文件，新版本的后缀，老版本后缀为.sst
   kDescriptorFile,  // db元数据文件，存储系统中的version信息，文件名为 MANIFEST-[0-9]，每当DB发生压缩的时候，会有新的内容记录到元数据中
   kCurrentFile,  // 记录当前使用的元数据名 cat CURRENR is MANIFEST-000002
   kTempFile,  // 临时文件，db在修复过程中会产生临时文件，文件名为[0-9]+.dbtmp

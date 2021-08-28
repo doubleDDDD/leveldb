@@ -122,38 +122,38 @@ RunChild()
     return;
 }
 
+int 
+Put(leveldb::DB* db_, const std::string& k, const std::string& v) 
+{
+    leveldb::WriteOptions write_options;
+    write_options.sync = true;
+    db_->Put(leveldb::WriteOptions(), k, v);
+    return 0;
+}
+
 void
 RunFather()
 {
     // sleep(2);
     // std::printf("father %d started!\n", getpid());
-
     // 另一个进程也需要连接数据库。有file级别的锁
     leveldb::DB *db = nullptr;
     leveldb::Options options;
 
     options.create_if_missing = true;
+    // Small write buffer
+    options.write_buffer_size = 100000;
     // 打开一个已经存在的数据库，打开数据库文件，打开的对象是目录
     leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
-    std::cout << status.ToString() << std::endl;
+    if(!status.ok()){
+        std::cout << status.ToString() << std::endl;
+        exit(-1);
+    }
     // assert(status.ok());
-
-    std::string key = "A";
-    std::string value = "a";
-    std::string get_value;
-    
-    // 写入 key1 -> value1
-    leveldb::Status s = db->Put(leveldb::WriteOptions(), key, value);
-
-    // 写入成功，就读取 key:people 对应的 value
-    if (s.ok())
-        s = db->Get(leveldb::ReadOptions(), "A", &get_value);
-
-    // 读取成功就输出
-    if (s.ok())
-        std::cout << get_value << std::endl;
-    else
-        std::cout << s.ToString() << std::endl;
+    // Put(db, "k4", std::string(100000, 'x'));  // Fill memtable.
+    // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
+    // Put(db, "k6", std::string(100000, 'z'));
+    Put(db, "k8", std::string(8000000, 'a'));
 
     // 关闭数据库的连接
     delete db;

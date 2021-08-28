@@ -79,6 +79,8 @@ struct LEVELDB_EXPORT Options {
   // so you may wish to adjust this parameter to control memory usage.
   // Also, a larger write buffer will result in a longer recovery time
   // the next time the database is opened.
+  // 这个默认的是4M，实际上是一个memtable的大小，超过这个大小之后就开始dump level0了
+  // 所以insert一定是一个内存操作，文件的大小的限制基本就在这里了
   size_t write_buffer_size = 4 * 1024 * 1024;
 
   // Number of open files that can be used by the DB.  You may need to
@@ -97,6 +99,7 @@ struct LEVELDB_EXPORT Options {
   // block size specified here corresponds to uncompressed data.  The
   // actual size of the unit read from disk may be smaller if
   // compression is enabled.  This parameter can be changed dynamically.
+  // table被划分为block，block中再容纳entry，一个block的大小是4K
   size_t block_size = 4 * 1024;
 
   // Number of keys between restart points for delta encoding of keys.
