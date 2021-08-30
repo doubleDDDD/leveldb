@@ -1221,7 +1221,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   w.sync = options.sync;
   w.done = false;
 
-  MutexLock l(&mutex_); // 包装一下这个锁，即mutex也要上车
+  MutexLock l(&mutex_); // 包装一下这个锁，即mutex也要上车，这里会尝试获取锁
   // std::deque<Writer*> writers_ GUARDED_BY(mutex_);  writers_是一个write队列
   // writers_也是DB连接实例中的数据结构啊，丰富
   writers_.push_back(&w);  // WriteBacth入队
@@ -1257,6 +1257,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     // into mem_.
     // 在写memtable之前写log
     {
+      // 这里有一个释放锁的操作，其它线程的写请求都不在第一个，所以都会等待被唤醒
+      // 在不持有锁的情况下，w1完成写入之后，其它线程可能会被唤醒，可以继续操作
       mutex_.Unlock();
       // static Slice Contents(const WriteBatch* batch) { return Slice(batch->rep_); }
       // status = log_->AddRecord(write_batch->rep_);
@@ -1303,6 +1305,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
 
   // Notify new head of write queue
   if (!writers_.empty()) {
+    // 被唤醒的线程执行批量的写入操作，能够提高并发下的性能，当其它线程被唤醒后，直接返回就可以了
     writers_.front()->cv.Signal();
   }
 
