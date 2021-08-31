@@ -1122,19 +1122,24 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   Status s;
   MutexLock l(&mutex_);
-  SequenceNumber snapshot;
+  SequenceNumber snapshot;  // 快照的本质上是一个序列号
   if (options.snapshot != nullptr) {
     snapshot =
         static_cast<const SnapshotImpl*>(options.snapshot)->sequence_number();
   } else {
+    // 默认的就是当前最新的序列号
     snapshot = versions_->LastSequence();
   }
 
   MemTable* mem = mem_;
   MemTable* imm = imm_;
+  // 读请求是与版本有关的，所以要获取当前的版本
+  // version会管理当前版本的所有SSTable
+  // 由于SSTable是需要压缩的，所以会面临不同的版本，但是memtable与imemtable这两个是没有多版本那一说的
   Version* current = versions_->current();
   mem->Ref();
   if (imm != nullptr) imm->Ref();
+  // 当读请求到来后会对version set的current_增加1个引用计数
   current->Ref();
 
   bool have_stat_update = false;
@@ -1146,10 +1151,11 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
-      // Done
+      // Done 没有多版本，所以可以直接读取
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
-      // Done
+      // Done 同memtable，没有多版本控制这一说，会变化的是SSTable，所以这依然与current是没有关系的
     } else {
+      // 多版本控制需要涉及到的是version的版本，所以Get如果落到SSTable上，会从当前版本的Get函数入手
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
     }

@@ -57,6 +57,7 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
                            const Slice* smallest_user_key,
                            const Slice* largest_user_key);
 
+// version = versionSet + versionEdit
 class Version {
  public:
   // Lookup the value for key.  If found, store it in *val and
@@ -151,6 +152,8 @@ class Version {
   int refs_;          // Number of live refs to this version
 
   // List of files per level
+  // 默认的level是7，所以这里本身是一个数组，数组元素是7，二维数组，7个元素的数组，每一个数组元素是一个指针
+  // 指向的是一系列SSTable 
   std::vector<FileMetaData*> files_[config::kNumLevels];
 
   // Next file to compact based on seek stats.

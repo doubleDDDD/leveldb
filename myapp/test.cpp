@@ -15,11 +15,12 @@
 #include <string>
 #include <condition_variable>
 #include <mutex>
-
-// 包含必要的头文件
 #include "leveldb/db.h"
+#include "leveldb/env.h"
+#include "db/version_edit.h"
+#include "db/log_reader.h"
 
-void 
+void
 BackTrace() 
 {
     unw_cursor_t cursor;
@@ -131,32 +132,59 @@ Put(leveldb::DB* db_, const std::string& k, const std::string& v)
     return 0;
 }
 
+/**
+ * @brief 打印版本控制文件MANIFEST
+ * 格式与log是一样的
+ * 对应多个versionEdit写入的过程
+ */
+void
+ManifestToString()
+{
+    leveldb::SequentialFile* file;
+    //MANIFEST files
+    leveldb::Status status = leveldb::Env::Default()->NewSequentialFile("/home/doubled/double_D/DB/leveldb/myapp/testdb/MANIFEST-000012", &file);
+    std::cout << status.ToString() << std::endl;
+
+    leveldb::log::Reader reader(file, NULL, true/*checksum*/, 0/*initial_offset*/);
+    // Read all the records and add to a memtable
+    std::string scratch;
+    leveldb::Slice record;
+    while (reader.ReadRecord(&record, &scratch) && status.ok()) {
+        leveldb::VersionEdit edit;
+        edit.DecodeFrom(record);
+        std::cout << edit.DebugString() << std::endl;
+    }
+    return;
+}
+
 void
 RunFather()
 {
-    // sleep(2);
-    // std::printf("father %d started!\n", getpid());
-    // 另一个进程也需要连接数据库。有file级别的锁
-    leveldb::DB *db = nullptr;
-    leveldb::Options options;
+    // // sleep(2);
+    // // std::printf("father %d started!\n", getpid());
+    // // 另一个进程也需要连接数据库。有file级别的锁
+    // leveldb::DB *db = nullptr;
+    // leveldb::Options options;
 
-    options.create_if_missing = true;
-    // Small write buffer
-    options.write_buffer_size = 100000;
-    // 打开一个已经存在的数据库，打开数据库文件，打开的对象是目录
-    leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
-    if(!status.ok()){
-        std::cout << status.ToString() << std::endl;
-        exit(-1);
-    }
-    // assert(status.ok());
-    // Put(db, "k4", std::string(100000, 'x'));  // Fill memtable.
-    // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
-    // Put(db, "k6", std::string(100000, 'z'));
-    Put(db, "k8", std::string(8000000, 'a'));
+    // options.create_if_missing = true;
+    // // Small write buffer
+    // options.write_buffer_size = 100000;
+    // // 打开一个已经存在的数据库，打开数据库文件，打开的对象是目录
+    // leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
+    // if(!status.ok()){
+    //     std::cout << status.ToString() << std::endl;
+    //     exit(-1);
+    // }
+    // // assert(status.ok());
+    // // Put(db, "k4", std::string(100000, 'x'));  // Fill memtable.
+    // // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
+    // // Put(db, "k6", std::string(100000, 'z'));
+    // // Put(db, "k8", std::string(8000000, 'a'));
 
-    // 关闭数据库的连接
-    delete db;
+    // // 关闭数据库的连接
+    // delete db;
+
+    ManifestToString();
 
     return;
 }

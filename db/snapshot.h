@@ -29,6 +29,7 @@ class SnapshotImpl : public Snapshot {
   SnapshotImpl* prev_;
   SnapshotImpl* next_;
 
+  // snapshot的本质就是一个版本号
   const SequenceNumber sequence_number_;
 
 #if !defined(NDEBUG)

@@ -278,13 +278,23 @@ static bool NewestFirst(FileMetaData* a, FileMetaData* b) {
   return a->number > b->number;
 }
 
+/**
+ * @brief files_是一个指针数组，有7层的话就是由7个slot
+ * 每一个slot是一个指针，指向当前版本当前层的所有SSTable
+ * 找到对应的SSTable，在指定SSTable中寻找具体的key在func函数中执行
+ * @param  user_key         desc
+ * @param  internal_key     desc
+ * @param  arg              desc
+ * @param  func             desc
+ */
 void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
                                  bool (*func)(void*, int, FileMetaData*)) {
   const Comparator* ucmp = vset_->icmp_.user_comparator();
 
   // Search level-0 in order from newest to oldest.
-  std::vector<FileMetaData*> tmp;
+  std::vector<FileMetaData*> tmp;  // SSTables元数据的vector
   tmp.reserve(files_[0].size());
+  // files_[0] means level0
   for (uint32_t i = 0; i < files_[0].size(); i++) {
     FileMetaData* f = files_[0][i];
     if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
@@ -304,6 +314,7 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   // Search other levels.
   for (int level = 1; level < config::kNumLevels; level++) {
     size_t num_files = files_[level].size();
+    // 每一层的元数据都是在内存中的，包括数据库中的所有的元数据
     if (num_files == 0) continue;
 
     // Binary search to find earliest index whose largest key >= internal_key.
@@ -321,6 +332,16 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
   }
 }
 
+/**
+ * @brief 读操作是可以落在SSTable上的，如果在memtable以及imemtable中的读操作是没有命中的，那么读一定会落到SSTable上
+ * SSTable是有版本这一说的，MVCC多版本并发控制说的就是这个SSTabel的版本，由于压缩的存在，SSTable面临着合并与删除的操作
+ * 版本与版本之间的SSTable是有差异的，所以需要从这里进入
+ * @param  options          desc
+ * @param  k                desc
+ * @param  value            desc
+ * @param  stats            desc
+ * @return Status @c 
+ */
 Status Version::Get(const ReadOptions& options, const LookupKey& k,
                     std::string* value, GetStats* stats) {
   stats->seek_file = nullptr;
@@ -351,6 +372,8 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
       state->last_file_read = f;
       state->last_file_read_level = level;
 
+      // 在一个SSTable文件内Get对应key的value
+      // 这个SSTable是version所对应的SSTable中的一个，MVCC
       state->s = state->vset->table_cache_->Get(*state->options, f->number,
                                                 f->file_size, state->ikey,
                                                 &state->saver, SaveValue);
@@ -394,6 +417,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   state.saver.user_key = k.user_key();
   state.saver.value = value;
 
+  // 在指定的SSTable集合寻找key对应的value
   ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match);
 
   return state.found ? state.s : Status::NotFound(Slice());
@@ -467,6 +491,11 @@ bool Version::OverlapInLevel(int level, const Slice* smallest_user_key,
                                smallest_user_key, largest_user_key);
 }
 
+// 为刚刚从memtable变成的SSTable选一个合适的level，所以memtable可以是level0，也可能直接写到更高的level
+// level0的文件个数是有限制的
+// 找一个合适的level放置新从memtable dump出的sstable
+// 注：不一定总是放到level 0，尽量放到更大的level
+// 如果[small, large]与0层有重叠，则直接返回0
 int Version::PickLevelForMemTableOutput(const Slice& smallest_user_key,
                                         const Slice& largest_user_key) {
   int level = 0;
@@ -596,6 +625,7 @@ class VersionSet::Builder {
  public:
   // Initialize a builder with the files from *base and other info from *vset
   Builder(VersionSet* vset, Version* base) : vset_(vset), base_(base) {
+    // base_代表的是当前版本
     base_->Ref();
     BySmallestKey cmp;
     cmp.internal_comparator = &vset_->icmp_;
@@ -744,7 +774,7 @@ VersionSet::VersionSet(const std::string& dbname, const Options* options,
       log_number_(0),
       prev_log_number_(0),
       descriptor_file_(nullptr),
-      descriptor_log_(nullptr),
+      descriptor_log_(nullptr),  // 确实起数据库的时候，这个描述符是null的
       dummy_versions_(this),
       current_(nullptr) {
   AppendVersion(new Version(this));
@@ -774,6 +804,14 @@ void VersionSet::AppendVersion(Version* v) {
   v->next_->prev_ = v;
 }
 
+/**
+ * @brief vesrsionEdit进行apply之后得到数据库的状态，即version，即当前版本包含哪些SSTable
+ * versionSet是version的集合
+ * MANIFEST第一条是全量的，之后的是增量
+ * @param  edit             desc
+ * @param  mu               desc
+ * @return Status @c 
+ */
 Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
   if (edit->has_log_number_) {
     assert(edit->log_number_ >= log_number_);
@@ -789,22 +827,30 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
   edit->SetNextFile(next_file_number_);
   edit->SetLastSequence(last_sequence_);
 
+  //1. New Version = Current Version + VersionEdit
   Version* v = new Version(this);
   {
+    // current version
+    // builder是一个辅助类
     Builder builder(this, current_);
-    builder.Apply(edit);
-    builder.SaveTo(v);
+    builder.Apply(edit);  // version+versionEdit
+    builder.SaveTo(v);  // = new version
   }
+  //2. 重新计算Compaction Level\Compaction Score
   Finalize(v);
 
+  //3. 打开数据库时，创建新的Manifest并保存当前版本信息，如果数据库已经是一直在run了，那么直接跳过new
   // Initialize new descriptor log file if necessary by creating
   // a temporary file that contains a snapshot of the current version.
   std::string new_manifest_file;
   Status s;
+  // 只有DB的连接实例第一次启动时的descriptor_log_才会是nullptr，所以才会创建新的MANIFEST
+  // 所以一个MANIFEST文件中会有多个version edit的实例
   if (descriptor_log_ == nullptr) {
     // No reason to unlock *mu here since we only hit this path in the
     // first call to LogAndApply (when opening the database).
     assert(descriptor_file_ == nullptr);
+    // 创建新的MANIFEST文件
     new_manifest_file = DescriptorFileName(dbname_, manifest_file_number_);
     edit->SetNextFile(next_file_number_);
     s = env_->NewWritableFile(new_manifest_file, &descriptor_file_);
@@ -814,6 +860,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     }
   }
 
+  // DB在持续run的过程中没有新建的那个过程
   // Unlock during expensive MANIFEST log write
   {
     mu->Unlock();
@@ -821,9 +868,11 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     // Write new record to MANIFEST log
     if (s.ok()) {
       std::string record;
-      edit->EncodeTo(&record);
-      s = descriptor_log_->AddRecord(record);
+      edit->EncodeTo(&record);  // 序列化version edit
+      s = descriptor_log_->AddRecord(record);  // 将序列化后的version edit追加到当前的MANIFEST文件中
       if (s.ok()) {
+        // 如果set了sync，则sync到storage，不同于sync数据，一般需要修改多个位置
+        // 然而仅仅是追加一条记录到MANIFEST文件中，这个可以理解为顺序IO写操作
         s = descriptor_file_->Sync();
       }
       if (!s.ok()) {
@@ -833,6 +882,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
 
     // If we just created a new descriptor file, install it by writing a
     // new CURRENT file that points to it.
+    // 如果MANIFEST文件是新建的，则需要修改CURRENT文件去指向
     if (s.ok() && !new_manifest_file.empty()) {
       s = SetCurrentFile(env_, dbname_, manifest_file_number_);
     }
@@ -842,6 +892,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
 
   // Install the new version
   if (s.ok()) {
+    // make v is current Version
     AppendVersion(v);
     log_number_ = edit->log_number_;
     prev_log_number_ = edit->prev_log_number_;
@@ -859,6 +910,11 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
   return s;
 }
 
+// DB open的时候会依据 manifest文件来恢复version
+// version是一个运行时版本控制的实例
+// VersionSet维护了一份Version列表，包含当前Alive的所有Version信息，列表中第一个代表数据库的当前版本
+// VersionSet类只有一个实例，在DBImpl(数据库实现类)类中，维护所有活动的Version对象，来看VersionSet的所有语境
+// s = versions_->Recover(save_manifest);
 Status VersionSet::Recover(bool* save_manifest) {
   struct LogReporter : public log::Reader::Reporter {
     Status* status;
@@ -878,9 +934,10 @@ Status VersionSet::Recover(bool* save_manifest) {
   }
   current.resize(current.size() - 1);
 
+  // 打开当前（CURRENT所指向的）的 MANIFEST 文件，db启动的时候是会有对应一个MANIFEST文件的
   std::string dscname = dbname_ + "/" + current;
-  SequentialFile* file;
-  s = env_->NewSequentialFile(dscname, &file);
+  SequentialFile* file;  // 理解为一个文件描述符 
+  s = env_->NewSequentialFile(dscname, &file);  // 实际上就是open MANIFEST文件
   if (!s.ok()) {
     if (s.IsNotFound()) {
       return Status::Corruption("CURRENT points to a non-existent file",
@@ -907,8 +964,10 @@ Status VersionSet::Recover(bool* save_manifest) {
                        0 /*initial_offset*/);
     Slice record;
     std::string scratch;
+    // 依次读取manifest中的VersionEdit信息，构建VersionSet
     while (reader.ReadRecord(&record, &scratch) && s.ok()) {
       ++read_records;
+      // 读versionEdit
       VersionEdit edit;
       s = edit.DecodeFrom(record);
       if (s.ok()) {
@@ -921,6 +980,7 @@ Status VersionSet::Recover(bool* save_manifest) {
       }
 
       if (s.ok()) {
+        // 根据 edit 构建 version
         builder.Apply(&edit);
       }
 
@@ -978,6 +1038,7 @@ Status VersionSet::Recover(bool* save_manifest) {
     prev_log_number_ = prev_log_number;
 
     // See if we can reuse the existing MANIFEST file.
+    // 某些情况下，可以尝试复用MANIFEST，所以也并不是只要db重启都会对应着MANIFEST文件的新建
     if (ReuseManifest(dscname, current)) {
       // No need to save new manifest
     } else {

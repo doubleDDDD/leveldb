@@ -15,6 +15,7 @@ namespace leveldb {
 
 class VersionSet;
 
+// 代表的是一个SSTable的元数据
 struct FileMetaData {
   FileMetaData() : refs(0), allowed_seeks(1 << 30), file_size(0) {}
 
@@ -26,6 +27,9 @@ struct FileMetaData {
   InternalKey largest;   // Largest internal key served by table
 };
 
+// versionEdit表示的是版本与版本之间的变化，即delta增量
+// VersionEdit会保存到MANIFEST文件中，当做数据恢复时就会从MANIFEST文件中读出来重建数据
+// 那么，何时会触发版本变迁呢？Compaction
 class VersionEdit {
  public:
   VersionEdit() { Clear(); }
@@ -60,14 +64,15 @@ class VersionEdit {
   // Add the specified file at the specified number.
   // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
   // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
+  // 更新 new_file_
   void AddFile(int level, uint64_t file, uint64_t file_size,
                const InternalKey& smallest, const InternalKey& largest) {
-    FileMetaData f;
-    f.number = file;
-    f.file_size = file_size;
-    f.smallest = smallest;
-    f.largest = largest;
-    new_files_.push_back(std::make_pair(level, f));
+    FileMetaData f;  // 这个file指的是一个SSTable文件
+    f.number = file;  // sstable都是有编号的
+    f.file_size = file_size;  // 文件大小
+    f.smallest = smallest;  // 下界
+    f.largest = largest;  // 上界
+    new_files_.push_back(std::make_pair(level, f));  //新增文件
   }
 
   // Delete the specified "file" from the specified "level".
@@ -97,8 +102,8 @@ class VersionEdit {
   bool has_last_sequence_;
 
   std::vector<std::pair<int, InternalKey>> compact_pointers_;
-  DeletedFileSet deleted_files_;
-  std::vector<std::pair<int, FileMetaData>> new_files_;
+  DeletedFileSet deleted_files_;  // 待删除的文件
+  std::vector<std::pair<int, FileMetaData>> new_files_;  //新增文件，例如immutable memtable dump后就会添加到new_files_
 };
 
 }  // namespace leveldb
