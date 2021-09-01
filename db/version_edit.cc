@@ -38,6 +38,11 @@ void VersionEdit::Clear() {
   new_files_.clear();
 }
 
+/**
+ * @brief 相当于是当前db的状态的一个dump
+ * 有啥加啥，啥有效就编码之后加入到edit中
+ * @param  dst              desc
+ */
 void VersionEdit::EncodeTo(std::string* dst) const {
   if (has_comparator_) {
     PutVarint32(dst, kComparator);

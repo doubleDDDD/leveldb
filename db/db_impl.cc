@@ -178,34 +178,48 @@ DBImpl::~DBImpl() {
   }
 }
 
+/**
+ * @brief 从无到有创建数据库
+ * @return Status @c 
+ */
 Status DBImpl::NewDB() {
+  // 新创建的第一个对象是 version edit
   VersionEdit new_db;
   new_db.SetComparatorName(user_comparator()->Name());
   new_db.SetLogNumber(0);
+  // 二话没说直接下一个文件的编号就是从2开始的，实际验证的话MANIFEST文件的编号是从2开始的，第一个log文件的编号是从3开始的
   new_db.SetNextFile(2);
-  new_db.SetLastSequence(0);
+  new_db.SetLastSequence(0);  // 这个是真实的数据库操作的序列号，这个开始的值确实是0
 
+  // 在levelDB中，MANIFEST文件被称为描述文件 descriptor file，这里生成的MANIFEST文件的序列号是1，应该在后续有修正
   const std::string manifest = DescriptorFileName(dbname_, 1);
+  // std::printf("New DB, new a manifest name: %s\n", manifest.c_str());
   WritableFile* file;
+  // 这里可以理解为open文件
   Status s = env_->NewWritableFile(manifest, &file);
   if (!s.ok()) {
     return s;
   }
   {
-    log::Writer log(file);
+    log::Writer log(file);  // MANIFEST文件的writer
     std::string record;
     new_db.EncodeTo(&record);
     s = log.AddRecord(record);
+    // 尝试看一下第一个record长啥样子，基本上啥也没有，大部分内容是空的，所以第一个version edit还是基本啥也没有
+    // std::printf("New DB, first record in MANIFEST: %s\n", record.c_str());
     if (s.ok()) {
+      // 立刻同步下去
       s = file->Sync();
     }
     if (s.ok()) {
+      // 立刻关闭文件now
       s = file->Close();
     }
   }
   delete file;
   if (s.ok()) {
     // Make "CURRENT" file that points to the new manifest file.
+    // 此时current文件指向的是MANIFEST-000001
     s = SetCurrentFile(env_, dbname_, 1);
   } else {
     env_->RemoveFile(manifest);
@@ -222,6 +236,10 @@ void DBImpl::MaybeIgnoreError(Status* s) const {
   }
 }
 
+/**
+ * @brief 删除废弃的文件
+ * Obsolete means 废弃的陈旧的
+ */
 void DBImpl::RemoveObsoleteFiles() {
   mutex_.AssertHeld();
 
@@ -289,13 +307,15 @@ void DBImpl::RemoveObsoleteFiles() {
   mutex_.Lock();
 }
 
+// 数据库启动都要走这里，其中save_manifest为false
 Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   mutex_.AssertHeld();
 
   // Ignore error from CreateDir since the creation of the DB is
   // committed only when the descriptor is created, and this directory
   // may already exist from a previous failed creation attempt.
-  env_->CreateDir(dbname_);  // 尝试创建代表数据库的目录
+  env_->CreateDir(dbname_);  // 尝试创建代表数据库的目录，类似于mkdir的-p参数，有没有都可以去走创建的路子
+  // 文件已经创建
   assert(db_lock_ == nullptr);
   // 同一时刻，只能有1个process打开数据库，db的这个实例在process退出之后也一并退出了
   // 尝试获取文件级别的锁操作
@@ -308,7 +328,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
     if (options_.create_if_missing) {
       Log(options_.info_log, "Creating DB %s since it was missing.",
           dbname_.c_str());
-      s = NewDB();
+      s = NewDB();  // 从无到有创建数据库
       if (!s.ok()) {
         return s;
       }
@@ -323,6 +343,19 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
     }
   }
 
+  // 这里就是仅仅创建了 MANIFEST-1文件，版本代表的是一些列的SSTable文件，而版本的表现就是MANIFEST文件
+  // 如果在这里直接调用exit(-1),那么db中现有的文件包括 MANIFEST-1,levelDB系统级的LOG,CURRENT文件以及LOCK文件
+  // 所以到此为止数据库中包含4个文件，全部都算是元数据没有真实的数据还，当前的MANIFEST文件结构如下所示
+  // ...
+  // OK
+  // VersionEdit {
+  //   Comparator: leveldb.BytewiseComparator
+  //   LogNumber: 0
+  //   NextFile: 2  // 下一个文件的标号确实是2。而且这里预计是MANIFEST文件会变成2，即在新建一个levelDB数据库的过程中，会生成MANIFEST-2
+  //   LastSeq: 0  // 现在还没有真正的读写或删除操作，所以这个seq依然是0
+  // }
+  // ...
+  // exit(-1);
   s = versions_->Recover(save_manifest);
   if (!s.ok()) {
     return s;
@@ -339,6 +372,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   const uint64_t min_log = versions_->LogNumber();
   const uint64_t prev_log = versions_->PrevLogNumber();
   std::vector<std::string> filenames;
+  // filenames包括数据库中的所有子目录，除了自己与爸爸，还包括MANIFEST,LOG,LOCK,CURRENT四个文件
   s = env_->GetChildren(dbname_, &filenames);
   if (!s.ok()) {
     return s;
@@ -349,6 +383,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   FileType type;
   std::vector<uint64_t> logs;
   for (size_t i = 0; i < filenames.size(); i++) {
+    // logfile第一次创建的时候是不存在的，所以这里执行完毕之后，logs应该是空的
     if (ParseFileName(filenames[i], &number, &type)) {
       expected.erase(number);
       if (type == kLogFile && ((number >= min_log) || (number == prev_log)))
@@ -365,6 +400,8 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   // Recover in the order in which the logs were generated
   std::sort(logs.begin(), logs.end());
   for (size_t i = 0; i < logs.size(); i++) {
+    // 需要根据log内容去恢复memtable，levelDB关闭之后，memtable中的内容是不会记录在SSTable中
+    // 所以只是持久化到了log中，这还是log中有的内容，所以需要恢复
     s = RecoverLogFile(logs[i], (i == logs.size() - 1), save_manifest, edit,
                        &max_sequence);
     if (!s.ok()) {
@@ -492,6 +529,9 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
     }
   }
 
+  // 数据库重启之后，log的内容恢复到memtable中，但是log是否复用呢。这个是有一个对应的判断的
+  // 自己的一个测试例子中，先put一对kv到数据库中，kv仅仅位于log中
+  // 但是在第二次启动这数据库的过程中，需要重新创建一个新的log文件，即需要将当前的数据内容compact到level0中，即第一个SSTable即将产生
   if (mem != nullptr) {
     // mem did not get reused; compact it.
     if (status.ok()) {
@@ -504,18 +544,20 @@ Status DBImpl::RecoverLogFile(uint64_t log_number, bool last_log,
   return status;
 }
 
-// memtable到L0表
+// memtable到L0表，SSTable一定发生了变化，则说明一定有版本的迭代过程
+// 注意虽然函数名字是WriteLevel0Table，但是新生成 sstable，并不一定总是会放到 level 0，例如如果 key range 与 level 1层的所有文件都没有 overlap，那就会直接放到 level 1
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
                                 Version* base) {
   mutex_.AssertHeld();
   const uint64_t start_micros = env_->NowMicros();
   FileMetaData meta;
-  meta.number = versions_->NewFileNumber();
+  meta.number = versions_->NewFileNumber();  // 当前版本来决定下一个文件的序列号
   pending_outputs_.insert(meta.number);
   Iterator* iter = mem->NewIterator();  // 这个是skiplist的迭代器目的是为了能够很快的遍历skiplist（排序表）
   Log(options_.info_log, "Level-0 table #%llu: started",
       (unsigned long long)meta.number);
 
+  // sstable 创建完成
   Status s;
   {
     mutex_.Unlock();
@@ -538,6 +580,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
     if (base != nullptr) {
       level = base->PickLevelForMemTableOutput(min_user_key, max_user_key);
     }
+    // 生成新的SSTable意味着版本的迭代，edit来记录这个变化的文件，有文件的新增
     edit->AddFile(level, meta.number, meta.file_size, meta.smallest,
                   meta.largest);
   }
@@ -549,7 +592,9 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   return s;
 }
 
-// memtable->L0 的过程
+/**
+ * @brief minor compaction，即memtable到SSTable的过程
+ */
 void DBImpl::CompactMemTable() {
   mutex_.AssertHeld();
   assert(imm_ != nullptr);
@@ -558,6 +603,9 @@ void DBImpl::CompactMemTable() {
   VersionEdit edit;
   Version* base = versions_->current();
   base->Ref();
+  // 注意虽然函数名字是WriteLevel0Table，但是新生成 sstable，并不一定总是会放到 level 0，例如如果 key range 与 level 1层的所有文件都没有 overlap，那就会直接放到 level 1
+  // 将memtable落盘，意味着SSTable有所增加，所以需要将证信息记录到edit中，但是这个变量是栈上的局部变量啊，即edit中将显示一个add file的记录
+  // 如果有开同步写，则意味着这里需要落盘，否则语义与操作系统的语义是一样的，除非机器GG，否则数据是不会丢失的
   Status s = WriteLevel0Table(imm_, &edit, base);
   base->Unref();
 
@@ -567,16 +615,25 @@ void DBImpl::CompactMemTable() {
 
   // Replace immutable memtable with the generated Table
   if (s.ok()) {
+    // 继续修改edit的字段
     edit.SetPrevLogNumber(0);
     edit.SetLogNumber(logfile_number_);  // Earlier logs no longer needed
+    // 将edit应用到version，意味着版本的迭代与修改，version要变
+    // version_ means versionset，即全局的那一个实例
     s = versions_->LogAndApply(&edit, &mutex_);
   }
 
   if (s.ok()) {
     // Commit to the new state
+    // 这里代表的是一个新版本的提交，即一个version edit的写入，一个新的current version的形成
     imm_->Unref();
     imm_ = nullptr;
     has_imm_.store(false, std::memory_order_release);
+    // 新版本形成之后，有一些文件不再需要，通过该函数来选出并删除
+    // 因为在版本迭代的过程中，如果有读线程在读上一个版本的SSTable
+    // 那么上一个版本的SSTable是需要被删除的，这些SSTable需要被延迟删除
+    // 多线程之间是通过引用计数来实现延迟删除的
+    // Obsolete means 废弃的
     RemoveObsoleteFiles();
   } else {
     RecordBackgroundError(s);
@@ -704,11 +761,17 @@ void DBImpl::BackgroundCall() {
   background_work_finished_signal_.SignalAll();
 }
 
+/**
+ * @brief 后台压缩线程的代码入口
+ * 反正已经被触发了
+ */
 void DBImpl::BackgroundCompaction() {
   mutex_.AssertHeld();
 
+  // minor compact的优先级是高于major的优先级的
+  // 因为minor一旦被阻塞，整个levelDB都无法对外提供服务
   if (imm_ != nullptr) {
-    CompactMemTable();  // 仅仅是 memtable->L0
+    CompactMemTable();  // 正常情况下是 memtable->L0
     return;
   }
 
@@ -1538,6 +1601,8 @@ DB::~DB() = default;
 
 /**
  * @brief open一个数据库进入的是这里
+ * 主要就是恢复过一些状态，levelDB如果要持续对外提供服务，需要app代码自己完成死循环常驻的过程
+ * 后续的写操作都可能会造成版本的迭代
  * @param  options          desc 配置
  * @param  dbname           desc 目录代表一个完整的数据库
  * @param  dbptr            desc
@@ -1548,15 +1613,32 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
 
   DBImpl* impl = new DBImpl(options, dbname);
   impl->mutex_.Lock();
+  // 打开数据库的第一件事就是创建一个edit的实例，这里如果在后续的recover中
+  // 如果有SSTable的形成，那么这个edit就会有相应的变化，即addfile的接口就会被使用
   VersionEdit edit;
   // Recover handles create_if_missing, error_if_exists
   bool save_manifest = false;
   Status s = impl->Recover(&edit, &save_manifest);
+  // exit(-1);
+  // 如果在recover之后GG，那么现有的文件依然是 CURRENT  LOCK  LOG  MANIFEST-000001
+  // MANIFEST文件依然还未更新，编号依然是1
+  // 在reopen的过程中在这里GG，观察一下变化
+  // ...
+  // exit(-1);
+  // ...
+  // 内容会被持久化到SSTable中，但是log还没有被删除
+  // 在reopen的过程中在这里GG，观察一下变化
   if (s.ok() && impl->mem_ == nullptr) {
+    // 如果在reopen一个数据库的过程中，如果log被转化为了SSTable，那么数据库打开实例的memtable就是null，这里会重新创建memtable
+    // 如果reopen的过程只是一个open而没有put的操作，那么新创建的memtable将会是空
+    // 在任意时刻，只有一个memtable，memtable与log是一一对应的
+    // 如果有log，那么levelDB在恢复阶段将由于log恢复出memtable来，所以如果这里走到了这里，只能说明当时没有log，需要在这里创建memtable
     // Create new log and a corresponding memtable.
-    uint64_t new_log_number = impl->versions_->NewFileNumber();
-    WritableFile* lfile;
-    // 新建 WAL 日志文件，文件名是[0-9].log
+    uint64_t new_log_number = impl->versions_->NewFileNumber();  // 文件的序列号是version版本来确定的
+    // 数据库中新文件的编号是3，即第一个log文件的编号是3，应该是无法复用MANIFEST-1文件，所以提前先把MANIFEST-2的这个编号2预留了下来，到第一个日志这里，就到3了
+    // std::printf("new log number: %ld\n", new_log_number);
+    WritableFile* lfile;  // 代表的是log file
+    // 新建 WAL 日志文件，文件名是[0-9].log，如果是完全新建的数据库，则日志名为 000003.log
     s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
                                      &lfile);
     if (s.ok()) {
@@ -1564,16 +1646,47 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
       impl->logfile_ = lfile;
       impl->logfile_number_ = new_log_number;
       impl->log_ = new log::Writer(lfile);  // 新建 WAL log 文件
-      impl->mem_ = new MemTable(impl->internal_comparator_);
+      impl->mem_ = new MemTable(impl->internal_comparator_);  // log要对应memtable，数据应该写入memtable的过程中是先写入log文件中的
       impl->mem_->Ref();
     }
   }
+  // MANIFEST-1
+  //...
+  // OK
+  // VersionEdit {
+  //   Comparator: leveldb.BytewiseComparator
+  //   LogNumber: 0
+  //   NextFile: 2
+  //   LastSeq: 0
+  // }
+  //...
+  // 对比一下 MANIFEST-2，确实是有版本的迭代，下一个文件的编号发生了变化，因为log文件已经被创建了
+  // 简简单单的push一个小kv下去不会触发版本的改变，所以这个地方要专门触发才可以
+  // ...
+  // OK
+  // VersionEdit {
+  //   Comparator: leveldb.BytewiseComparator
+  // }
+
+  // VersionEdit {
+  //   LogNumber: 3
+  //   PrevLogNumber: 0
+  //   NextFile: 4
+  //   LastSeq: 0
+  // }
+  // ...
   if (s.ok() && save_manifest) {
+    // 需要重建MANIFEST文件，从0-1创建数据库则意味着该MANIFEST文件将占用编号2
     edit.SetPrevLogNumber(0);  // No older logs needed after recovery.
     edit.SetLogNumber(impl->logfile_number_);
+    // 反正这里会再新建一个版本，即意味着版本又一次的迭代
     s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
   }
+  // exit(-1);
+  // 在这里GG的话，可以看到MANIFEST-1以及MANIFEST-2文件共存的情况
+  // 多余的log文件以及MANIFEST文件会被干掉，这里只保留最新的文件集合
   if (s.ok()) {
+    // 例如 MANIFEST-1文件就是在这里被删除的
     impl->RemoveObsoleteFiles();
     impl->MaybeScheduleCompaction();
   }

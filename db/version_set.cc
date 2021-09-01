@@ -626,11 +626,11 @@ class VersionSet::Builder {
   // Initialize a builder with the files from *base and other info from *vset
   Builder(VersionSet* vset, Version* base) : vset_(vset), base_(base) {
     // base_代表的是当前版本
-    base_->Ref();
+    base_->Ref();  // 当前版本的ref+1
     BySmallestKey cmp;
     cmp.internal_comparator = &vset_->icmp_;
     for (int level = 0; level < config::kNumLevels; level++) {
-      levels_[level].added_files = new FileSet(cmp);
+      levels_[level].added_files = new FileSet(cmp); // 估摸着是一个对set的封装
     }
   }
 
@@ -656,6 +656,7 @@ class VersionSet::Builder {
   }
 
   // Apply all of the edits in *edit to the current state.
+  // current version + version edit
   void Apply(VersionEdit* edit) {
     // Update compaction pointers
     for (size_t i = 0; i < edit->compact_pointers_.size(); i++) {
@@ -668,7 +669,7 @@ class VersionSet::Builder {
     for (const auto& deleted_file_set_kvp : edit->deleted_files_) {
       const int level = deleted_file_set_kvp.first;
       const uint64_t number = deleted_file_set_kvp.second;
-      levels_[level].deleted_files.insert(number);
+      levels_[level].deleted_files.insert(number);  // 待删除文件加入到edit中
     }
 
     // Add new files
@@ -705,10 +706,12 @@ class VersionSet::Builder {
     for (int level = 0; level < config::kNumLevels; level++) {
       // Merge the set of added files with the set of pre-existing files.
       // Drop any deleted files.  Store the result in *v.
-      const std::vector<FileMetaData*>& base_files = base_->files_[level];
-      std::vector<FileMetaData*>::const_iterator base_iter = base_files.begin();
-      std::vector<FileMetaData*>::const_iterator base_end = base_files.end();
-      const FileSet* added_files = levels_[level].added_files;
+      // base_ means current version
+      const std::vector<FileMetaData*>& base_files = base_->files_[level];  // 当前层的当前版本的所有SSTable
+      std::vector<FileMetaData*>::const_iterator base_iter = base_files.begin();  // 指向当前版本当前层的key最小的文件
+      std::vector<FileMetaData*>::const_iterator base_end = base_files.end();  // 指向当前版本当前层key的最大的文件
+      const FileSet* added_files = levels_[level].added_files;  // apply的过程中下一个版本需要被新增的文件需要被append到added_files
+      // reserve是vector的方法，用于提高vector的容量
       v->files_[level].reserve(base_files.size() + added_files->size());
       for (const auto& added_file : *added_files) {
         // Add all smaller files listed in base_
@@ -725,6 +728,7 @@ class VersionSet::Builder {
       for (; base_iter != base_end; ++base_iter) {
         MaybeAddFile(v, level, *base_iter);
       }
+      // 到此为止，新版版的version中的files_的集合已经包含了所有该版本内的SSTable
 
 #ifndef NDEBUG
       // Make sure there is no overlap in levels > 0
@@ -808,6 +812,10 @@ void VersionSet::AppendVersion(Version* v) {
  * @brief vesrsionEdit进行apply之后得到数据库的状态，即version，即当前版本包含哪些SSTable
  * versionSet是version的集合
  * MANIFEST第一条是全量的，之后的是增量
+ * 
+ * 调用者是全局唯一的version set, version set持有若干共存的version，而version所持有的是SSTable的list
+ * 该函数中新建的version将取代调用者，即当前的version
+ * 假设这个进来的edit代表的是一个SSTable的add，可能需要额外处理一些域
  * @param  edit             desc
  * @param  mu               desc
  * @return Status @c 
@@ -833,7 +841,11 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     // current version
     // builder是一个辅助类
     Builder builder(this, current_);
-    builder.Apply(edit);  // version+versionEdit
+    // version+versionEdit
+    // 简单理解先，builder先记录哪些文件被删除，哪些文件被加入
+    builder.Apply(edit);
+    // 将状态update到new version的files_中，类似于是一个install的过程
+    // version的files_已经包含了edit处理过之后版本中应该有的SSTable
     builder.SaveTo(v);  // = new version
   }
   //2. 重新计算Compaction Level\Compaction Score
@@ -868,7 +880,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     // Write new record to MANIFEST log
     if (s.ok()) {
       std::string record;
-      edit->EncodeTo(&record);  // 序列化version edit
+      edit->EncodeTo(&record);  // edit序列化称为record，然后写入到MANIFEST中，这部分内容的标识就是version edit
       s = descriptor_log_->AddRecord(record);  // 将序列化后的version edit追加到当前的MANIFEST文件中
       if (s.ok()) {
         // 如果set了sync，则sync到storage，不同于sync数据，一般需要修改多个位置
@@ -893,7 +905,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
   // Install the new version
   if (s.ok()) {
     // make v is current Version
-    AppendVersion(v);
+    AppendVersion(v);  // 这就是一次版本迭代的过程
     log_number_ = edit->log_number_;
     prev_log_number_ = edit->prev_log_number_;
   } else {
@@ -915,6 +927,8 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
 // VersionSet维护了一份Version列表，包含当前Alive的所有Version信息，列表中第一个代表数据库的当前版本
 // VersionSet类只有一个实例，在DBImpl(数据库实现类)类中，维护所有活动的Version对象，来看VersionSet的所有语境
 // s = versions_->Recover(save_manifest);
+// save_manifest 在创建数据库的过程中是false
+// 无论MANIFEST是否是新建的，版本的recover都是一定的，如果MANIFEST的版本号就是1
 Status VersionSet::Recover(bool* save_manifest) {
   struct LogReporter : public log::Reader::Reporter {
     Status* status;
@@ -924,6 +938,7 @@ Status VersionSet::Recover(bool* save_manifest) {
   };
 
   // Read "CURRENT" file, which contains a pointer to the current manifest file
+  // 如果是新建的数据库，则此时的CURRENT文件指向的内容就是MANIFEST-000001
   std::string current;
   Status s = ReadFileToString(env_, CurrentFileName(dbname_), &current);
   if (!s.ok()) {
@@ -954,18 +969,21 @@ Status VersionSet::Recover(bool* save_manifest) {
   uint64_t last_sequence = 0;
   uint64_t log_number = 0;
   uint64_t prev_log_number = 0;
-  Builder builder(this, current_);
+  Builder builder(this, current_);  // builder是仅有一个的
   int read_records = 0;
 
   {
     LogReporter reporter;
     reporter.status = &s;
+    // 这个file代表的是当前的MANIFEST 文件
     log::Reader reader(file, &reporter, true /*checksum*/,
                        0 /*initial_offset*/);
     Slice record;
     std::string scratch;
     // 依次读取manifest中的VersionEdit信息，构建VersionSet
     while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+      // 在新建一个levelDB数据库之后，MANIFEST-1中只有一个version edit
+      // 如果在数据库已经运行了一段时间后重启的话。那么将对应多个 version edit
       ++read_records;
       // 读versionEdit
       VersionEdit edit;
@@ -981,6 +999,7 @@ Status VersionSet::Recover(bool* save_manifest) {
 
       if (s.ok()) {
         // 根据 edit 构建 version
+        // 但是这个都是中间过程，相当于把多个过程逐渐应用的过程
         builder.Apply(&edit);
       }
 
@@ -1025,12 +1044,21 @@ Status VersionSet::Recover(bool* save_manifest) {
     MarkFileNumberUsed(log_number);
   }
 
+  // 循环结束之后，builder是可以将一个当前 MANIFEST 文件中的多个 version edit 整合到一个 builder 中的
   if (s.ok()) {
+    // 假设levelDB刚刚被创建，最开始将生成第一个MANIFEST-0文件，现在将形成第一个版本
     Version* v = new Version(this);
+    // builder 已经把所有的version edit整合到一起了已经
+    // builder 也是变化的集合，saveto是要把变化反应到结果上的一个操作，v代表的一个新的版本
+    //    而版本则代表的是若干SSTable的集合，所以builder所代表的是变化，而saveto version将落地到具体的SSTable上
+    //    被抵消的SSTable就没有了
+    // version是一个版本，MANIFEST的第一个是一个完整的版本，后面的edit则代表的是变化，所以数据库在重新启动的过程中
+    // 所以内存中version的这个对象是依赖于MANIFEST这个文件的若干version edit所生成的
+    //    最后version所代表的是一系列SSTable的集合，即file_对象所在的二维数组
     builder.SaveTo(v);
     // Install recovered version
     Finalize(v);
-    AppendVersion(v);
+    AppendVersion(v);  // current是当前的刚新建的version
     manifest_file_number_ = next_file;
     next_file_number_ = next_file + 1;
     last_sequence_ = last_sequence;
@@ -1039,8 +1067,16 @@ Status VersionSet::Recover(bool* save_manifest) {
 
     // See if we can reuse the existing MANIFEST file.
     // 某些情况下，可以尝试复用MANIFEST，所以也并不是只要db重启都会对应着MANIFEST文件的新建
+    // 第一次MANIFEST-0文件变成MANIFEST-1文件的过程中是需要一个新的MANIFEST-2文件的
+    // 所以在创建一个全新的数据库的过程中，最后的MANIFEST文件的编号是2，log的最新编号直接是从3开始的
+    // 总结一下开始的样子
+    //    MANIFEST-1->MANIFEST-2->000003.log文件
+    //    所以正儿八经开始写数据的sst文件的编号在至少就要到3之后的4了
     if (ReuseManifest(dscname, current)) {
       // No need to save new manifest
+      // 可以复用旧的MANIFEST文件，这里基本就是 do nothing
+      // 现在默认的是false，即每次打开数据库都会重新生成MANIFEST文件，而不是简单的追加
+      // 如果只是简单的追加，MANIFEST文件会逐渐增大，即version edit会是在持续存在且不会被合并掉
     } else {
       *save_manifest = true;
     }
@@ -1053,6 +1089,13 @@ Status VersionSet::Recover(bool* save_manifest) {
   return s;
 }
 
+/**
+ * @brief 判断是否需要重新生成MANIFEST文件或复用旧的MANIFEST文件
+ * @param  dscname          desc
+ * @param  dscbase          desc
+ * @return true @c 
+ * @return false @c 
+ */
 bool VersionSet::ReuseManifest(const std::string& dscname,
                                const std::string& dscbase) {
   if (!options_->reuse_logs) {
@@ -1098,6 +1141,8 @@ void VersionSet::Finalize(Version* v) {
   for (int level = 0; level < config::kNumLevels - 1; level++) {
     double score;
     if (level == 0) {
+      // 0级关注的时候文件的数量，而非文件的总的字节数
+      // 这个原因后面再看吧
       // We treat level-0 specially by bounding the number of files
       // instead of number of bytes for two reasons:
       //
@@ -1113,6 +1158,7 @@ void VersionSet::Finalize(Version* v) {
               static_cast<double>(config::kL0_CompactionTrigger);
     } else {
       // Compute the ratio of current size to size limit.
+      // 要计算出每一层距离满还差多少
       const uint64_t level_bytes = TotalFileSize(v->files_[level]);
       score =
           static_cast<double>(level_bytes) / MaxBytesForLevel(options_, level);
@@ -1124,8 +1170,8 @@ void VersionSet::Finalize(Version* v) {
     }
   }
 
-  v->compaction_level_ = best_level;
-  v->compaction_score_ = best_score;
+  v->compaction_level_ = best_level;  // 最佳压缩级
+  v->compaction_score_ = best_score;  // 最佳压缩比例
 }
 
 Status VersionSet::WriteSnapshot(log::Writer* log) {

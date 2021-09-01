@@ -20,9 +20,11 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
   meta->file_size = 0;
   iter->SeekToFirst();
 
+  // .ldb文件源于这里，实际上就是SSTable文件，即被压缩到level0的文件
   std::string fname = TableFileName(dbname, meta->number);
   if (iter->Valid()) {
     WritableFile* file;
+    // open file
     s = env->NewWritableFile(fname, &file);
     if (!s.ok()) {
       return s;
@@ -31,6 +33,8 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     TableBuilder* builder = new TableBuilder(options, file);
     meta->smallest.DecodeFrom(iter->key());
     Slice key;
+    // 迭代器的目的就是为了遍历memtable
+    // 这里准备原样dump memtable中的内容到level0的SSTable文件中
     for (; iter->Valid(); iter->Next()) {
       key = iter->key();
       builder->Add(key, iter->value());
@@ -42,6 +46,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
     // Finish and check for builder errors
     s = builder->Finish();
     if (s.ok()) {
+      // meta代表的是这个SSTable的元数据，比如最大最小key以及其它一些描述信息等等
       meta->file_size = builder->FileSize();
       assert(meta->file_size > 0);
     }
@@ -73,6 +78,7 @@ Status BuildTable(const std::string& dbname, Env* env, const Options& options,
 
   if (s.ok() && meta->file_size > 0) {
     // Keep it
+    // 保留文件在次
   } else {
     env->RemoveFile(fname);
   }

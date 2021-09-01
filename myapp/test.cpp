@@ -142,7 +142,7 @@ ManifestToString()
 {
     leveldb::SequentialFile* file;
     //MANIFEST files
-    leveldb::Status status = leveldb::Env::Default()->NewSequentialFile("/home/doubled/double_D/DB/leveldb/myapp/testdb/MANIFEST-000012", &file);
+    leveldb::Status status = leveldb::Env::Default()->NewSequentialFile("/home/doubled/double_D/DB/leveldb/myapp/testdb/MANIFEST-000004", &file);
     std::cout << status.ToString() << std::endl;
 
     leveldb::log::Reader reader(file, NULL, true/*checksum*/, 0/*initial_offset*/);
@@ -160,31 +160,31 @@ ManifestToString()
 void
 RunFather()
 {
-    // // sleep(2);
-    // // std::printf("father %d started!\n", getpid());
-    // // 另一个进程也需要连接数据库。有file级别的锁
-    // leveldb::DB *db = nullptr;
-    // leveldb::Options options;
+    // sleep(2);
+    // std::printf("father %d started!\n", getpid());
+    // 另一个进程也需要连接数据库。有file级别的锁
+    leveldb::DB *db = nullptr;
+    leveldb::Options options;
 
-    // options.create_if_missing = true;
-    // // Small write buffer
-    // options.write_buffer_size = 100000;
-    // // 打开一个已经存在的数据库，打开数据库文件，打开的对象是目录
-    // leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
-    // if(!status.ok()){
-    //     std::cout << status.ToString() << std::endl;
-    //     exit(-1);
-    // }
-    // // assert(status.ok());
-    // // Put(db, "k4", std::string(100000, 'x'));  // Fill memtable.
-    // // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
-    // // Put(db, "k6", std::string(100000, 'z'));
-    // // Put(db, "k8", std::string(8000000, 'a'));
+    options.create_if_missing = true;
+    // Small write buffer
+    options.write_buffer_size = 100000;
+    // 打开一个已经存在的数据库，打开数据库文件，打开的对象是目录
+    leveldb::Status status = leveldb::DB::Open(options, "./testdb", &db);
+    if(!status.ok()){
+        std::cout << status.ToString() << std::endl;
+        exit(-1);
+    }
+    // assert(status.ok());
+    Put(db, "k1", "double_D!");  // Fill memtable.
+    // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
+    // Put(db, "k6", std::string(100000, 'z'));
+    // Put(db, "k8", std::string(8000000, 'a'));
 
-    // // 关闭数据库的连接
-    // delete db;
+    // 关闭数据库的连接
+    delete db;
 
-    ManifestToString();
+    // ManifestToString();
 
     return;
 }
