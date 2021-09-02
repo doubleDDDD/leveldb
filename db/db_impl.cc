@@ -561,6 +561,7 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   Status s;
   {
     mutex_.Unlock();
+    // sstable 持久化自后，文件的相关信息通过meta返回，文件是否保证落盘取决于系统的配置，即是否sync
     s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
     mutex_.Lock();
   }
@@ -776,6 +777,7 @@ void DBImpl::BackgroundCompaction() {
   }
 
   // 后续可能涉及继续压缩的过程，比如L0->L1/2/3
+  // major compact
   Compaction* c;
   bool is_manual = (manual_compaction_ != nullptr);
   InternalKey manual_end;
@@ -1181,6 +1183,13 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
   return versions_->MaxNextLevelOverlappingBytes();
 }
 
+/**
+ * @brief levelDB的读操作
+ * @param  options          desc
+ * @param  key              desc
+ * @param  value            desc
+ * @return Status @c 
+ */
 Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   Status s;
@@ -1203,6 +1212,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   mem->Ref();
   if (imm != nullptr) imm->Ref();
   // 当读请求到来后会对version set的current_增加1个引用计数
+  // 即使有其它的编发写线程触发了compact，即版本的迭代，当前版本的引用计数+1意味着版本迭代后就版本对应的SSTable会被延迟删除
   current->Ref();
 
   bool have_stat_update = false;
@@ -1212,9 +1222,11 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
   {
     mutex_.Unlock();
     // First look in the memtable, then in the immutable memtable (if any).
+    // memtable以及immutable任意时刻都各自只有一个，所以这个get操作不需要考虑版本的问题，只有多线程并发的问题
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
       // Done 没有多版本，所以可以直接读取
+      // 在某一次操作中，数据库重启后，SSTable中的数据确实是不会被加载到memtable中的
     } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
       // Done 同memtable，没有多版本控制这一说，会变化的是SSTable，所以这依然与current是没有关系的
     } else {

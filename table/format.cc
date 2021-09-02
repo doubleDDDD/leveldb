@@ -61,6 +61,14 @@ Status Footer::DecodeFrom(Slice* input) {
   return result;
 }
 
+/**
+ * @brief 
+ * @param  file             desc
+ * @param  options          desc
+ * @param  handle           desc 表明了偏移与大小
+ * @param  result           desc 存放结果，即SSTable中的索引块
+ * @return Status @c 
+ */
 Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
                  const BlockHandle& handle, BlockContents* result) {
   result->data = Slice();
@@ -69,10 +77,12 @@ Status ReadBlock(RandomAccessFile* file, const ReadOptions& options,
 
   // Read the block contents as well as the type/crc footer.
   // See table_builder.cc for the code that built this structure.
-  size_t n = static_cast<size_t>(handle.size());
-  char* buf = new char[n + kBlockTrailerSize];
+  size_t n = static_cast<size_t>(handle.size()); // index块的大小
+  char* buf = new char[n + kBlockTrailerSize];  // 申请新的内存空间
   Slice contents;
+  // 继续读取数据，即handle中的偏移量
   Status s = file->Read(handle.offset(), n + kBlockTrailerSize, &contents, buf);
+  // contents存放的是index块的数据，通过contents只需要再多一次的IO就能直接把数据读回来了
   if (!s.ok()) {
     delete[] buf;
     return s;

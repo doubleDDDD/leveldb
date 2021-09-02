@@ -175,8 +175,12 @@ RunFather()
         std::cout << status.ToString() << std::endl;
         exit(-1);
     }
+
+    std::string get_value;
+    leveldb::Status s = db->Get(leveldb::ReadOptions(), "k1", &get_value);
+    std::cout<< get_value << std::endl;
     // assert(status.ok());
-    Put(db, "k1", "double_D!");  // Fill memtable.
+    // Put(db, "k1", "double_D!");  // Fill memtable.
     // Put(db, "k5", std::string(100000, 'y'));  // Trigger compaction.
     // Put(db, "k6", std::string(100000, 'z'));
     // Put(db, "k8", std::string(8000000, 'a'));

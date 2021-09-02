@@ -45,6 +45,7 @@ class BlockHandle {
 
 // Footer encapsulates the fixed information stored at the tail
 // end of every table file.
+// footer是保存在SSTable文件末端的数据，理解为元数据
 class Footer {
  public:
   // Encoded length of a Footer.  Note that the serialization of a

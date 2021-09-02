@@ -282,6 +282,8 @@ static bool NewestFirst(FileMetaData* a, FileMetaData* b) {
  * @brief files_是一个指针数组，有7层的话就是由7个slot
  * 每一个slot是一个指针，指向当前版本当前层的所有SSTable
  * 找到对应的SSTable，在指定SSTable中寻找具体的key在func函数中执行
+ * ...
+ * 能在上一层找到就不会进入到下一层
  * @param  user_key         desc
  * @param  internal_key     desc
  * @param  arg              desc
@@ -293,19 +295,26 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
 
   // Search level-0 in order from newest to oldest.
   std::vector<FileMetaData*> tmp;  // SSTables元数据的vector
-  tmp.reserve(files_[0].size());
+  tmp.reserve(files_[0].size());  // rsize vector tmp是level0的所有的SSTable的元数据
   // files_[0] means level0
   for (uint32_t i = 0; i < files_[0].size(); i++) {
+    // files_ 对应的是一个版本的常驻数据
     FileMetaData* f = files_[0][i];
+    // 介绍一下比较器
+    // user_key要比最小的大，要比最大的小
     if (ucmp->Compare(user_key, f->smallest.user_key()) >= 0 &&
         ucmp->Compare(user_key, f->largest.user_key()) <= 0) {
-      tmp.push_back(f);
+      tmp.push_back(f);  // 目标key在这个 file 内
     }
   }
   if (!tmp.empty()) {
+    // 在当前层有命中，那么就一定不会出现在下一层，就在本层完成读操作，本层的数据一定是相对比较new的
     std::sort(tmp.begin(), tmp.end(), NewestFirst);
+    // std::sort 越新的排在越前面，新指的是序列号
     for (uint32_t i = 0; i < tmp.size(); i++) {
       if (!(*func)(arg, 0, tmp[i])) {
+        // 从最新的开始找，找到就直接返回了
+        // func涉及到从sstable file中读取的操作
         return;
       }
     }
@@ -336,9 +345,11 @@ void Version::ForEachOverlapping(Slice user_key, Slice internal_key, void* arg,
  * @brief 读操作是可以落在SSTable上的，如果在memtable以及imemtable中的读操作是没有命中的，那么读一定会落到SSTable上
  * SSTable是有版本这一说的，MVCC多版本并发控制说的就是这个SSTabel的版本，由于压缩的存在，SSTable面临着合并与删除的操作
  * 版本与版本之间的SSTable是有差异的，所以需要从这里进入
+ * ...
+ * 但是levelDB的seek次数是个什么情况呢
  * @param  options          desc
  * @param  k                desc
- * @param  value            desc
+ * @param  value            desc，返回结果的指针，这个是要返回结果给用户的
  * @param  stats            desc
  * @return Status @c 
  */
@@ -347,6 +358,8 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   stats->seek_file = nullptr;
   stats->seek_file_level = -1;
 
+  // 这怎么有点像闭包啊
+  // c++原来也是有闭包的
   struct State {
     Saver saver;
     GetStats* stats;
@@ -360,6 +373,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
     bool found;
 
     static bool Match(void* arg, int level, FileMetaData* f) {
+      // level代表在第几层查找
       State* state = reinterpret_cast<State*>(arg);
 
       if (state->stats->seek_file == nullptr &&
@@ -374,6 +388,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
 
       // 在一个SSTable文件内Get对应key的value
       // 这个SSTable是version所对应的SSTable中的一个，MVCC
+      // table_cache_是属于version set的，相当于是SSTable在memory中的缓存
       state->s = state->vset->table_cache_->Get(*state->options, f->number,
                                                 f->file_size, state->ikey,
                                                 &state->saver, SaveValue);
@@ -402,6 +417,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
     }
   };
 
+  // state 相当于是一辆车，读操作要先构造车，再把读请求送下去
   State state;
   state.found = false;
   state.stats = stats;
@@ -417,7 +433,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   state.saver.user_key = k.user_key();
   state.saver.value = value;
 
-  // 在指定的SSTable集合寻找key对应的value
+  // 在指定的SSTable集合寻找key对应的value，这里貌似是会涉及到多次seek的问题，貌似所有SSTable的metadata并不是常驻memory的
   ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match);
 
   return state.found ? state.s : Status::NotFound(Slice());
@@ -661,6 +677,7 @@ class VersionSet::Builder {
     // Update compaction pointers
     for (size_t i = 0; i < edit->compact_pointers_.size(); i++) {
       const int level = edit->compact_pointers_[i].first;
+      // vset属于builder，相当于是一辆车
       vset_->compact_pointer_[level] =
           edit->compact_pointers_[i].second.Encode().ToString();
     }
@@ -669,10 +686,12 @@ class VersionSet::Builder {
     for (const auto& deleted_file_set_kvp : edit->deleted_files_) {
       const int level = deleted_file_set_kvp.first;
       const uint64_t number = deleted_file_set_kvp.second;
+      // levels_属于builder，依然相当于是一辆车
       levels_[level].deleted_files.insert(number);  // 待删除文件加入到edit中
     }
 
     // Add new files
+    // 在这里将决定是否执行major compact
     for (size_t i = 0; i < edit->new_files_.size(); i++) {
       const int level = edit->new_files_[i].first;
       FileMetaData* f = new FileMetaData(edit->new_files_[i].second);
@@ -684,13 +703,20 @@ class VersionSet::Builder {
       //   (2) Writing or reading 1MB costs 10ms (100MB/s)
       //   (3) A compaction of 1MB does 25MB of IO:
       //         1MB read from this level
-      //         10-12MB read from next level (boundaries may be misaligned)
+      //         10-12MB read from next level (boundaries may be misaligned) 10-12MB是经验值
       //         10-12MB written to next level
       // This implies that 25 seeks cost the same as the compaction
       // of 1MB of data.  I.e., one seek costs approximately the
       // same as the compaction of 40KB of data.  We are a little
       // conservative and allow approximately one seek for every 16KB
       // of data before triggering a compaction.
+      // ...
+      // 1MB的compact时间是250ms
+      // 一次seek花费10ms
+      // 所以40KB的compact时间=1次seek的时间，保守点取值16KB，
+      // 以一次seek的时间为单位，compact一个文件的时间是 file_size/16KB
+      //  
+      // ...
       f->allowed_seeks = static_cast<int>((f->file_size / 16384U));
       if (f->allowed_seeks < 100) f->allowed_seeks = 100;
 

@@ -35,34 +35,69 @@ struct Table::Rep {
   Block* index_block;
 };
 
+/**
+ * @brief 读SSTable的流程
+ * 文件已经打开了
+ * @param  options          desc
+ * @param  file             desc 文件句柄即fd
+ * @param  size             desc file大小
+ * @param  table            desc 这是一个输出参数，通过该输出结果就可以遍历SSTable了
+ * @return Status @c 
+ */
 Status Table::Open(const Options& options, RandomAccessFile* file,
                    uint64_t size, Table** table) {
-  *table = nullptr;
+  *table = nullptr;  // 这个是我们需要返回的结果
   if (size < Footer::kEncodedLength) {
     return Status::Corruption("file is too short to be an sstable");
   }
 
   char footer_space[Footer::kEncodedLength];
   Slice footer_input;
+  // 读取文件末尾的48个字节的元数据，反序列化到 footer
+  // 这里就是操作系统的文件读操作
+  // 只是读取了文件的一部分
   Status s = file->Read(size - Footer::kEncodedLength, Footer::kEncodedLength,
                         &footer_input, footer_space);
   if (!s.ok()) return s;
 
+  // https://zhuanlan.zhihu.com/p/80523835
+  // 这个地址就比较详细的描述SSTable的物理布局，清晰明了
+  // 最简单的理解就是SSTable中会有元数据来表明整个文件的 begin_key-end_key
+  // 但是如果只有一对beginkey与endkey的话，每一次二分都需要把整个SSTable全部读取进来，底层的SSTable是非常巨大的，这个是很低效的
+  //    所以在SSTable内部，继续做了划分，最小的单位是block，所谓的元数据用于表明 哪些块 的的begin-key与end-key
+  //    所以只需要读取一个小单位的SSTable，就可以一次性知道目标key所在SSTable文件中的位置
+  //    这也是这个元数据的意义 
+  //    这个叫做 index block，即数据索引区，先把这个块（4096）读取到内存中，多花一次机会就能够直接判断数据块在SSTable中的位置了
+  //    data block 存放的是实际的数据
   Footer footer;
-  s = footer.DecodeFrom(&footer_input);
+  // 相当于要读SSTable的元数据
+  s = footer.DecodeFrom(&footer_input);  // 这里是一个反序列化的过程，把file中的字符串数据变成了内存中结构体的描述
   if (!s.ok()) return s;
+  // 来show一个footer的结果
+  // 最后48字节固定是描述信息，一个SSTable文件对应一个
+  // $33 = {metaindex_handle_ = {offset_ = 35, size_ = 8}, index_handle_ = {offset_ = 48, size_ = 22}}
+  //      其中index handle中所指示的偏移与大小表示的是 整个SSTable中的索引
+  //      而其中MetaBlock Index存放的值所指向的块是Filter Block
+  //        貌似是数据与索引之间的分隔
+  // 所以一个SSTable文件会对应2组size与offset
+  // SSTable的基本单位是block，这个是物理布局
+  // 但是还要考虑逻辑布局，即大家都是block，但是各个block保存什么内容是不一样的
+  // 数据block保存kv，metadata block保存一些管理数据
 
-  // Read the index block
+  // Read the index block，即索引块的数据
   BlockContents index_block_contents;
   ReadOptions opt;
   if (options.paranoid_checks) {
     opt.verify_checksums = true;
   }
+  // 读取index block到内存
   s = ReadBlock(file, opt, footer.index_handle(), &index_block_contents);
 
   if (s.ok()) {
     // We've successfully read the footer and the index block: we're
     // ready to serve requests.
+    // 构建一个索引块的内存对象
+    // index block在SSTable中独占一个块
     Block* index_block = new Block(index_block_contents);
     Rep* rep = new Table::Rep;
     rep->options = options;
@@ -72,6 +107,7 @@ Status Table::Open(const Options& options, RandomAccessFile* file,
     rep->cache_id = (options.block_cache ? options.block_cache->NewId() : 0);
     rep->filter_data = nullptr;
     rep->filter = nullptr;
+    // table对象是一个要被返回的对象，可以理解为读取了index_block的内容后的返回
     *table = new Table(rep);
     (*table)->ReadMeta(footer);
   }

@@ -38,6 +38,13 @@ TableCache::TableCache(const std::string& dbname, const Options& options,
 
 TableCache::~TableCache() { delete cache_; }
 
+/**
+ * @brief 读取SSTable文件
+ * @param  file_number      desc
+ * @param  file_size        desc
+ * @param  handle           desc 将要返回的结果
+ * @return Status @c 
+ */
 Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
                              Cache::Handle** handle) {
   Status s;
@@ -48,7 +55,10 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
   if (*handle == nullptr) {
     std::string fname = TableFileName(dbname_, file_number);
     RandomAccessFile* file = nullptr;
+    // table代表的就是一个SSTable
+    // 这个是结果返回之后，与文件fd绑定后共同insert到vesion set的table cache中
     Table* table = nullptr;
+    // 这里就是一个文件的open
     s = env_->NewRandomAccessFile(fname, &file);
     if (!s.ok()) {
       std::string old_fname = SSTTableFileName(dbname_, file_number);
@@ -57,6 +67,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
       }
     }
     if (s.ok()) {
+      // 开始读取SSTable了,index block是知道的了
       s = Table::Open(options_, file, file_size, &table);
     }
 
@@ -66,6 +77,7 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
       // We do not cache error results so that if the error is transient,
       // or somebody repairs the file, we recover automatically.
     } else {
+      // 这个才是SSTable的车，在内存中的运载体，把fd与table这个对象绑定到了一起
       TableAndFile* tf = new TableAndFile;
       tf->file = file;
       tf->table = table;
@@ -97,6 +109,16 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
   return result;
 }
 
+/**
+ * @brief get操作如果在内存中没有命中的话，就会查找storage上的文件
+ * @param  options          desc
+ * @param  file_number      desc
+ * @param  file_size        desc
+ * @param  k                desc
+ * @param  arg              desc
+ * @param  handle_result    desc
+ * @return Status @c 
+ */
 Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
                        uint64_t file_size, const Slice& k, void* arg,
                        void (*handle_result)(void*, const Slice&,
