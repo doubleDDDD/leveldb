@@ -68,6 +68,10 @@ Status TableCache::FindTable(uint64_t file_number, uint64_t file_size,
     }
     if (s.ok()) {
       // 开始读取SSTable了,index block是知道的了
+      // 如果走到这一步，说明这里出发了两次的磁盘IO
+      //    一次是读取SSTable的尾部的48字节
+      //    然后就是根据尾部的48字节把index block读上来，这里需要2次IO，仅仅是数据的实际位置不需要读取
+      //      根据index block的数据就可以执行索引的工作，进而直接确定目标key所在文件中的偏移
       s = Table::Open(options_, file, file_size, &table);
     }
 
@@ -111,12 +115,13 @@ Iterator* TableCache::NewIterator(const ReadOptions& options,
 
 /**
  * @brief get操作如果在内存中没有命中的话，就会查找storage上的文件
+ * 函数短短的3行都有点故事啊
  * @param  options          desc
  * @param  file_number      desc
  * @param  file_size        desc
- * @param  k                desc
+ * @param  k                internal key
  * @param  arg              desc
- * @param  handle_result    desc
+ * @param  handle_result    SaveValue func
  * @return Status @c 
  */
 Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
@@ -124,9 +129,12 @@ Status TableCache::Get(const ReadOptions& options, uint64_t file_number,
                        void (*handle_result)(void*, const Slice&,
                                              const Slice&)) {
   Cache::Handle* handle = nullptr;
+  // FindTable将对应SSTable的index block读上来，根据这个就可以在内存中完成缩索引工作了
   Status s = FindTable(file_number, file_size, &handle);
   if (s.ok()) {
     Table* t = reinterpret_cast<TableAndFile*>(cache_->Value(handle))->table;
+    // TableAndFile 是fd与table描述符联合的数据结构
+    // 根据 index block 来读取实际的数据块，如果存在的话，完成实际的读取IO工作，否则查找失败
     s = t->InternalGet(options, k, arg, handle_result);
     cache_->Release(handle);
   }

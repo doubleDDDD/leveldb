@@ -247,11 +247,21 @@ Iterator* Table::NewIterator(const ReadOptions& options) const {
       &Table::BlockReader, const_cast<Table*>(this), options);
 }
 
+/**
+ * @brief 
+ * @param  options          desc
+ * @param  k                internal key
+ * @param  arg              desc
+ * @param  handle_result    SaveValue func
+ * @return Status @c 
+ */
 Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
                           void (*handle_result)(void*, const Slice&,
                                                 const Slice&)) {
   Status s;
+  // 迭代器
   Iterator* iiter = rep_->index_block->NewIterator(rep_->options.comparator);
+  // seek in block.cc，一个块内的seek，即 index block
   iiter->Seek(k);
   if (iiter->Valid()) {
     Slice handle_value = iiter->value();
@@ -261,9 +271,11 @@ Status Table::InternalGet(const ReadOptions& options, const Slice& k, void* arg,
         !filter->KeyMayMatch(handle.offset(), k)) {
       // Not found
     } else {
+      // 根据index block有一个读取数据块的过程
       Iterator* block_iter = BlockReader(this, options, iiter->value());
       block_iter->Seek(k);
       if (block_iter->Valid()) {
+        // 在该SSTable中找到了
         (*handle_result)(arg, block_iter->key(), block_iter->value());
       }
       s = block_iter->status();

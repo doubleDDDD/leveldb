@@ -308,6 +308,7 @@ void DBImpl::RemoveObsoleteFiles() {
 }
 
 // 数据库启动都要走这里，其中save_manifest为false
+// 数据库启动，当前版本为空
 Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
   mutex_.AssertHeld();
 
@@ -343,7 +344,7 @@ Status DBImpl::Recover(VersionEdit* edit, bool* save_manifest) {
     }
   }
 
-  // 这里就是仅仅创建了 MANIFEST-1文件，版本代表的是一些列的SSTable文件，而版本的表现就是MANIFEST文件
+  // 这里就是仅仅创建了 MANIFEST-1文件，版本代表的是一系列的SSTable文件，而版本的表现就是MANIFEST文件
   // 如果在这里直接调用exit(-1),那么db中现有的文件包括 MANIFEST-1,levelDB系统级的LOG,CURRENT文件以及LOCK文件
   // 所以到此为止数据库中包含4个文件，全部都算是元数据没有真实的数据还，当前的MANIFEST文件结构如下所示
   // ...
@@ -763,8 +764,8 @@ void DBImpl::BackgroundCall() {
 }
 
 /**
- * @brief 后台压缩线程的代码入口
- * 反正已经被触发了
+ * @brief 
+ * 后台压缩线程的入口
  */
 void DBImpl::BackgroundCompaction() {
   mutex_.AssertHeld();
@@ -794,19 +795,28 @@ void DBImpl::BackgroundCompaction() {
         (m->end ? m->end->DebugString().c_str() : "(end)"),
         (m->done ? "(end)" : manual_end.DebugString().c_str()));
   } else {
+    // 最重要的一个变量就是 inputs_ 包含本层要被压缩的SSTable以及下一层接收的SSTable
+    // 核心就是compact被影响到的sstable
+    // 就是选取一层需要compact的文件列表，及相关的下层文件列表，记录在Compaction*返回
     c = versions_->PickCompaction();
   }
 
+  // c是一个compaction的实例，compaction代表的是筛选结果
   Status status;
   if (c == nullptr) {
     // Nothing to do
   } else if (!is_manual && c->IsTrivialMove()) {
     // Move file to next level
+    // compact 导致的版本更新，并且完成版本的迭代先
+    // 什么条件下，可以直接使用原文件，而节省重新生成文件这个过程？ 
     assert(c->num_input_files(0) == 1);
     FileMetaData* f = c->input(0, 0);
     c->edit()->RemoveFile(c->level(), f->number);
     c->edit()->AddFile(c->level() + 1, f->number, f->file_size, f->smallest,
                        f->largest);
+    // 这个就把版本迭代完了，MANIFEST文件一定会被同步阻塞的完成修改
+    // 在这种条件下，MANIFEST发生了变化
+    // 但是SSTable本身的内容是没有发生变化的，仅仅是SSTable的层数发生了变化
     status = versions_->LogAndApply(c->edit(), &mutex_);
     if (!status.ok()) {
       RecordBackgroundError(status);
@@ -818,7 +828,9 @@ void DBImpl::BackgroundCompaction() {
         status.ToString().c_str(), versions_->LevelSummary(&tmp));
   } else {
     CompactionState* compact = new CompactionState(c);
+    // 正常情况下，通过DoCompactionWork完成文件的归并操作
     status = DoCompactionWork(compact);
+    // LogAndApply in DoCompactionWork 版本的迭代在函数 DoCompactionWork 中完成
     if (!status.ok()) {
       RecordBackgroundError(status);
     }
@@ -960,6 +972,11 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 
+/**
+ * @brief 正常情况下，通过DoCompactionWork完成文件的归并操作
+ * @param  compact          desc
+ * @return Status @c 
+ */
 Status DBImpl::DoCompactionWork(CompactionState* compact) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
@@ -978,6 +995,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     compact->smallest_snapshot = snapshots_.oldest()->sequence_number();
   }
 
+  // 首先获取遍历文件所需要的的迭代器
   Iterator* input = versions_->MakeInputIterator(compact->compaction);
 
   // Release mutex while we're actually doing the compaction work
@@ -1185,6 +1203,7 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 
 /**
  * @brief levelDB的读操作
+ * 用户调用的接口直接到这里
  * @param  options          desc
  * @param  key              desc
  * @param  value            desc
@@ -1231,13 +1250,18 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
       // Done 同memtable，没有多版本控制这一说，会变化的是SSTable，所以这依然与current是没有关系的
     } else {
       // 多版本控制需要涉及到的是version的版本，所以Get如果落到SSTable上，会从当前版本的Get函数入手
+      // 因为SSTable是依赖于当前的某版本的，所以SSTable是版本的所有物
+      // current 版本有一个 table cache 会保存SSTable的元数据（index block）
+      //    这个相当于是SSTable内的数据索引
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
     }
     mutex_.Lock();
   }
 
+  // 读操作已经结束了
   if (have_stat_update && current->UpdateStats(stats)) {
+    // 如果读操作导致一个SSTable的seek次数降低到0，可能需要触发一个compact，把冷数据compact到下一层
     MaybeScheduleCompaction();
   }
   mem->Unref();
@@ -1345,6 +1369,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
       // status = log_->AddRecord(write_batch->rep_);
       // 这里就是在写日志文件，log是包含header的，就是裸的header，序列号也没有必要落实到每一个kv对上
       // 基于文件系统的问题就是，你log了我的log
+      // log中kv的顺序完全是乱的
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
       if (status.ok() && options.sync) {
@@ -1624,6 +1649,7 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   *dbptr = nullptr;
 
   DBImpl* impl = new DBImpl(options, dbname);
+  // 到此为止，当前版本为空
   impl->mutex_.Lock();
   // 打开数据库的第一件事就是创建一个edit的实例，这里如果在后续的recover中
   // 如果有SSTable的形成，那么这个edit就会有相应的变化，即addfile的接口就会被使用

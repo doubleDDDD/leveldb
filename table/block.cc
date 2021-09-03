@@ -161,6 +161,9 @@ class Block::Iter : public Iterator {
     } while (ParseNextKey() && NextEntryOffset() < original);
   }
 
+  // 读操作需要从这里迭代SSTable文件
+  // 在 index block 这个范围内二分查找能够找到key是否在当前SSTable，如果在的话，位于哪一个数据块
+  // 比较的实体就是这个块，代表的是 index block
   void Seek(const Slice& target) override {
     // Binary search in restart array to find the last restart point
     // with a key < target
@@ -184,6 +187,7 @@ class Block::Iter : public Iterator {
       }
     }
 
+    // 典型的二分查找
     while (left < right) {
       uint32_t mid = (left + right + 1) / 2;
       uint32_t region_offset = GetRestartPoint(mid);

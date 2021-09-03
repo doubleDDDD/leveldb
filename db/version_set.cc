@@ -259,7 +259,18 @@ struct Saver {
   std::string* value;
 };
 }  // namespace
+
+/**
+ * @brief get的过程中在某SSTable找到了就会运行到这里来
+ * SSTable中的值查找完成之后，这里相当于是一个回调
+ * 返回值将返回给用户，即 state.saver.value
+ * @param  arg              desc
+ * @param  ikey             desc
+ * @param  v                desc
+ */
 static void SaveValue(void* arg, const Slice& ikey, const Slice& v) {
+  // state.saver.value = value;
+  // 可以看到 saver所指向的value就是用户所需要的value，所以get到之后在这里返回即可
   Saver* s = reinterpret_cast<Saver*>(arg);
   ParsedInternalKey parsed_key;
   if (!ParseInternalKey(ikey, &parsed_key)) {
@@ -434,6 +445,7 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
   state.saver.value = value;
 
   // 在指定的SSTable集合寻找key对应的value，这里貌似是会涉及到多次seek的问题，貌似所有SSTable的metadata并不是常驻memory的
+  // 在没有缓存的情况下，每一层的每一个文件都需要两次IO读取SSTable的最后48字节以及对应的index block来引导实际数据的存储位置
   ForEachOverlapping(state.saver.user_key, state.ikey, &state, &State::Match);
 
   return state.found ? state.s : Status::NotFound(Slice());
@@ -442,9 +454,10 @@ Status Version::Get(const ReadOptions& options, const LookupKey& k,
 bool Version::UpdateStats(const GetStats& stats) {
   FileMetaData* f = stats.seek_file;
   if (f != nullptr) {
+    // seek 了文件但是没有找到，就需要--，即浪费了一次机会
     f->allowed_seeks--;
     if (f->allowed_seeks <= 0 && file_to_compact_ == nullptr) {
-      file_to_compact_ = f;
+      file_to_compact_ = f;  // 如果已经没有机会了，将文件标记为需要被compact
       file_to_compact_level_ = stats.seek_file_level;
       return true;
     }
@@ -711,12 +724,14 @@ class VersionSet::Builder {
       // conservative and allow approximately one seek for every 16KB
       // of data before triggering a compaction.
       // ...
+      // 一个文件被seek了很多次，但是均已失败而告终，则说明这个文件有点冷了，需要被compact到下一层了
+      // ...
       // 1MB的compact时间是250ms
       // 一次seek花费10ms
       // 所以40KB的compact时间=1次seek的时间，保守点取值16KB，
       // 以一次seek的时间为单位，compact一个文件的时间是 file_size/16KB
-      //  
       // ...
+      // 直接说结论，以上得出的结果就是，一个文件可以被seek而不中的次数
       f->allowed_seeks = static_cast<int>((f->file_size / 16384U));
       if (f->allowed_seeks < 100) f->allowed_seeks = 100;
 
@@ -874,7 +889,7 @@ Status VersionSet::LogAndApply(VersionEdit* edit, port::Mutex* mu) {
     // version的files_已经包含了edit处理过之后版本中应该有的SSTable
     builder.SaveTo(v);  // = new version
   }
-  //2. 重新计算Compaction Level\Compaction Score
+  //2. 重新计算Compaction Level\Compaction Score，下一次compact时才会用到的数据
   Finalize(v);
 
   //3. 打开数据库时，创建新的Manifest并保存当前版本信息，如果数据库已经是一直在run了，那么直接跳过new
@@ -1159,6 +1174,12 @@ void VersionSet::MarkFileNumberUsed(uint64_t number) {
   }
 }
 
+/**
+ * @brief apply新版本的时候可能会运行到这里
+ * 所以在版本迭代的过程中，在确定文件的新增与降低的过程中顺便 为major compact 筛选文件
+ * 计算compact的level和score，更新到compaction_level_&&compaction_score_
+ * @param  v                desc
+ */
 void VersionSet::Finalize(Version* v) {
   // Precomputed best level for next compaction
   int best_level = -1;
@@ -1168,7 +1189,7 @@ void VersionSet::Finalize(Version* v) {
     double score;
     if (level == 0) {
       // 0级关注的时候文件的数量，而非文件的总的字节数
-      // 这个原因后面再看吧
+      // 
       // We treat level-0 specially by bounding the number of files
       // instead of number of bytes for two reasons:
       //
@@ -1180,12 +1201,16 @@ void VersionSet::Finalize(Version* v) {
       // file size is small (perhaps because of a small write-buffer
       // setting, or very high compression ratios, or lots of
       // overwrites/deletions).
+      // level0的文件个数超过4就触发compact，level0看的是文件的个数
+      //    level0文件整体不排序，可能会有overlap
+      // 如果文件个数超过4，则积一分
       score = v->files_[level].size() /
               static_cast<double>(config::kL0_CompactionTrigger);
     } else {
       // Compute the ratio of current size to size limit.
-      // 要计算出每一层距离满还差多少
       const uint64_t level_bytes = TotalFileSize(v->files_[level]);
+      // MaxBytesForLevel(options_, level); 算出的是每一层的基准大小
+      // 10M << (level-1)，即第一层最大的字节数是10M，而第二层的最大字节数是100M
       score =
           static_cast<double>(level_bytes) / MaxBytesForLevel(options_, level);
     }
@@ -1196,8 +1221,8 @@ void VersionSet::Finalize(Version* v) {
     }
   }
 
-  v->compaction_level_ = best_level;  // 最佳压缩级
-  v->compaction_score_ = best_score;  // 最佳压缩比例
+  v->compaction_level_ = best_level;  // 累积到版本上
+  v->compaction_score_ = best_score;  // 累计到版本上
 }
 
 Status VersionSet::WriteSnapshot(log::Writer* log) {
@@ -1383,26 +1408,39 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
   return result;
 }
 
+/**
+ * @brief 
+ * @return Compaction* @c 
+ */
 Compaction* VersionSet::PickCompaction() {
   Compaction* c;
   int level;
 
   // We prefer compactions triggered by too much data in a level over
   // the compactions triggered by seeks.
+  // 文件数量过多
   const bool size_compaction = (current_->compaction_score_ >= 1);
+  // seek多次一直不中的次数太大
   const bool seek_compaction = (current_->file_to_compact_ != nullptr);
   if (size_compaction) {
-    level = current_->compaction_level_;
+    // 文件数量过多
+    level = current_->compaction_level_; // 哪一层的文件数量过多
     assert(level >= 0);
+    // 被压缩的是当前层与下一层的SSTable
     assert(level + 1 < config::kNumLevels);
+    // compaction的实例是与level级别对应的
+    // 压缩这个行为的车
+    // 每一个压缩的对象都有2个input对象，分别对应当前层与下一层的SSTable
+    // 这些将是所有被影响到的SSTable
     c = new Compaction(options_, level);
 
     // Pick the first file that comes after compact_pointer_[level]
     for (size_t i = 0; i < current_->files_[level].size(); i++) {
+      // 将遍历当前层的所有SSTable
       FileMetaData* f = current_->files_[level][i];
       if (compact_pointer_[level].empty() ||
           icmp_.Compare(f->largest.Encode(), compact_pointer_[level]) > 0) {
-        c->inputs_[0].push_back(f);
+        c->inputs_[0].push_back(f);  // 反正当前层这个SSTable应该被压缩
         break;
       }
     }
@@ -1411,8 +1449,10 @@ Compaction* VersionSet::PickCompaction() {
       c->inputs_[0].push_back(current_->files_[level][0]);
     }
   } else if (seek_compaction) {
+    // 文件seek一直不中
     level = current_->file_to_compact_level_;
     c = new Compaction(options_, level);
+    // file_to_compact_代表的是这个冷掉的数据，需要去下一层了
     c->inputs_[0].push_back(current_->file_to_compact_);
   } else {
     return nullptr;
@@ -1423,6 +1463,7 @@ Compaction* VersionSet::PickCompaction() {
 
   // Files in level 0 may overlap each other, so pick up all overlapping ones
   if (level == 0) {
+    // 第0层需要全部都看
     InternalKey smallest, largest;
     GetRange(c->inputs_[0], &smallest, &largest);
     // Note that the next call will discard the file we placed in
@@ -1432,6 +1473,8 @@ Compaction* VersionSet::PickCompaction() {
     assert(!c->inputs_[0].empty());
   }
 
+  // inputs_[0]填充了第一层要参与 compact 的文件
+  // 接下来就是要计算下一层参与 compact 的文件，记录到inputs_[1]
   SetupOtherInputs(c);
 
   return c;
@@ -1635,6 +1678,7 @@ bool Compaction::IsTrivialMove() const {
   // Avoid a move if there is lots of overlapping grandparent data.
   // Otherwise, the move could create a parent file that will require
   // a very expensive merge later on.
+  // 同时满足以下条件时，我们只要简单的把文件从level标记到level + 1层就可以了
   return (num_input_files(0) == 1 && num_input_files(1) == 0 &&
           TotalFileSize(grandparents_) <=
               MaxGrandParentOverlapBytes(vset->options_));
